@@ -1,6 +1,6 @@
 ## These things need fixing
 
-- [x] game stats on the homepage are not updating when there are games in progres
+- [x] game stats on the homepage are not updating when there are games in progress
 - [x] when the game owning player leaves then another player should be picked at random to be the game owner
 - [x] game owners should have the option to ban players
 - [] add a random gif to celebrate the winner of each game. show this in a modal that shows a podium of the top 3 players and their points.
