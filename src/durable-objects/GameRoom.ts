@@ -16,6 +16,7 @@ export class GameRoomObject extends DurableObject {
   private roomCreatorId: string | null = null;
   private gameStarted: boolean = false;
   private customWords: string[] | null = null;
+  private currentRoundNumber: number = 0;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -174,6 +175,7 @@ export class GameRoomObject extends DurableObject {
     }
 
     this.gameStarted = true;
+    this.currentRoundNumber = 0; // Reset round counter for new game
     this.startNewRound();
 
     return Response.json({ success: true });
@@ -304,7 +306,8 @@ export class GameRoomObject extends DurableObject {
     this.lastDrawerIndex = (this.lastDrawerIndex + 1) % playerIds.length;
     const drawerId = playerIds[this.lastDrawerIndex];
     
-    const roundNumber = (this.currentRound?.roundNumber || 0) + 1;
+    this.currentRoundNumber += 1;
+    const roundNumber = this.currentRoundNumber;
     
     // Generate 3 word choices
     const wordChoices = [this.getRandomWord(), this.getRandomWord(), this.getRandomWord()];
@@ -409,7 +412,7 @@ export class GameRoomObject extends DurableObject {
     }
 
     const roundData = this.currentRound;
-    const shouldEndGame = roundData && roundData.roundNumber >= this.maxRounds;
+    const shouldEndGame = this.currentRoundNumber >= this.maxRounds;
     
     // Send round-end with word only to players who guessed correctly + drawer
     for (const [playerId, ws] of this.webSockets) {
@@ -529,6 +532,7 @@ export class GameRoomObject extends DurableObject {
         player.score = 0;
       });
       this.lastDrawerIndex = -1;
+      this.currentRoundNumber = 0;
     }, 10000); // Reset after 10 seconds
   }
 }
