@@ -97,6 +97,11 @@ export class GameRoomObject extends DurableObject {
       timestamp: Date.now()
     }, playerId);
 
+    // Start the game if we have at least 2 players and no round is active
+    if (this.players.size >= 2 && !this.currentRound) {
+      setTimeout(() => this.startNewRound(), 1000);
+    }
+
     return Response.json({ playerId, player });
   }
 
@@ -147,7 +152,7 @@ export class GameRoomObject extends DurableObject {
     }
   }
 
-  private handleDraw(playerId: string, strokeData: DrawingStroke) {
+  private handleDraw(playerId: string, strokeData: any) {
     if (!this.currentRound || this.currentRound.drawerId !== playerId) {
       return; // Only drawer can draw
     }
@@ -222,21 +227,21 @@ export class GameRoomObject extends DurableObject {
       guessedPlayers: new Set()
     };
 
+    // Send round start to all players (without word)
     this.broadcast({
       type: 'round-start',
       data: {
         drawerId,
-        word: word, // Send word to drawer
-        timeLeft: this.currentRound.timeLeft
+        timeLeft: this.currentRound.timeLeft,
+        roundNumber: this.currentRound.roundNumber
       },
       timestamp: Date.now()
     });
 
     // Send word only to drawer
     this.sendToPlayer(drawerId, {
-      type: 'round-start',
+      type: 'drawer-word',
       data: {
-        drawerId,
         word,
         timeLeft: this.currentRound.timeLeft
       },
@@ -258,6 +263,13 @@ export class GameRoomObject extends DurableObject {
       }
 
       this.currentRound.timeLeft -= 1000;
+      
+      // Broadcast timer update
+      this.broadcast({
+        type: 'timer-update',
+        data: { timeLeft: this.currentRound.timeLeft },
+        timestamp: Date.now()
+      });
       
       if (this.currentRound.timeLeft <= 0) {
         this.endRound();

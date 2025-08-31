@@ -262,6 +262,12 @@ class GameClient {
             case 'round-start':
                 this.handleRoundStart(message.data);
                 break;
+            case 'drawer-word':
+                this.handleDrawerWord(message.data);
+                break;
+            case 'timer-update':
+                this.handleTimerUpdate(message.data);
+                break;
             case 'round-end':
                 this.handleRoundEnd(message.data);
                 break;
@@ -294,31 +300,16 @@ class GameClient {
     }
 
     updateRound(round) {
-        this.isDrawer = round.drawerId === this.playerId;
-        this.roundInfo.textContent = `Round ${round.roundNumber}`;
-        
-        // Update timer
-        const minutes = Math.floor(round.timeLeft / 60000);
-        const seconds = Math.floor((round.timeLeft % 60000) / 1000);
-        this.timer.textContent = `${minutes}:${seconds.toString().padStart(2, '0')}`;
-        
-        // Show/hide drawing tools and word
-        if (this.isDrawer) {
-            this.drawingTools.classList.remove('hidden');
-            this.wordDisplay.classList.remove('hidden');
-            this.currentWord.textContent = round.word;
-            this.gameStatus.textContent = 'You are drawing!';
-            this.canvas.classList.remove('disabled-canvas');
-            this.chatInput.disabled = true;
-            this.chatInput.placeholder = 'You cannot guess while drawing';
-        } else {
-            this.drawingTools.classList.add('hidden');
-            this.wordDisplay.classList.add('hidden');
-            this.gameStatus.textContent = 'Guess the drawing!';
-            this.canvas.classList.add('disabled-canvas');
-            this.chatInput.disabled = false;
-            this.chatInput.placeholder = 'Type your guess...';
+        if (round) {
+            this.roundInfo.textContent = `Round ${round.roundNumber}`;
+            this.updateTimer(round.timeLeft);
         }
+    }
+
+    updateTimer(timeLeft) {
+        const minutes = Math.floor(timeLeft / 60000);
+        const seconds = Math.floor((timeLeft % 60000) / 1000);
+        this.timer.textContent = `${minutes}:${seconds.toString().padStart(2, '0')}`;
     }
 
     updateChat(messages) {
@@ -348,7 +339,11 @@ class GameClient {
     }
 
     handleDraw(strokeData) {
-        this.drawStrokeOnCanvas(strokeData);
+        if (strokeData.clear) {
+            this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+        } else {
+            this.drawStrokeOnCanvas(strokeData);
+        }
     }
 
     handleGuess(message) {
@@ -357,15 +352,44 @@ class GameClient {
 
     handleRoundStart(data) {
         this.clearCanvas();
-        if (data.drawerId === this.playerId) {
-            this.currentWord.textContent = data.word;
+        this.isDrawer = data.drawerId === this.playerId;
+        this.roundInfo.textContent = `Round ${data.roundNumber}`;
+        this.updateTimer(data.timeLeft);
+        
+        // Update UI based on role
+        if (this.isDrawer) {
+            this.drawingTools.classList.remove('hidden');
+            this.gameStatus.textContent = 'You are drawing! Wait for your word...';
+            this.canvas.classList.remove('disabled-canvas');
+            this.chatInput.disabled = true;
+            this.chatInput.placeholder = 'You cannot guess while drawing';
+        } else {
+            this.drawingTools.classList.add('hidden');
+            this.wordDisplay.classList.add('hidden');
+            this.gameStatus.textContent = 'Guess the drawing!';
+            this.canvas.classList.add('disabled-canvas');
+            this.chatInput.disabled = false;
+            this.chatInput.placeholder = 'Type your guess...';
         }
+        
         this.addChatMessage({
             username: 'System',
-            message: 'New round started!',
+            message: `New round started! Round ${data.roundNumber}`,
             timestamp: Date.now(),
             isGuess: false
         });
+    }
+
+    handleDrawerWord(data) {
+        if (this.isDrawer) {
+            this.wordDisplay.classList.remove('hidden');
+            this.currentWord.textContent = data.word;
+            this.gameStatus.textContent = 'You are drawing!';
+        }
+    }
+
+    handleTimerUpdate(data) {
+        this.updateTimer(data.timeLeft);
     }
 
     handleRoundEnd(data) {
