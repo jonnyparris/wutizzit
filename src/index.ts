@@ -5,7 +5,8 @@ import {
   handleGetRoomState, 
   handleStartGame,
   handleWebSocket,
-  handleGetStats
+  handleGetStats,
+  handleGetActiveGames
 } from './handlers/rooms';
 
 export { GameRoomObject } from './durable-objects/GameRoom';
@@ -51,6 +52,8 @@ export default {
         return await handleWebSocket(request, env);
       } else if (url.pathname === '/api/stats' && request.method === 'GET') {
         response = await handleGetStats(env);
+      } else if (url.pathname === '/api/active-games' && request.method === 'GET') {
+        response = await handleGetActiveGames(env);
       } else if (url.pathname === '/' || url.pathname.startsWith('/assets/') || url.pathname.endsWith('.css') || url.pathname.endsWith('.js') || url.pathname.endsWith('.html')) {
         // Serve static assets
         return fetch(request);

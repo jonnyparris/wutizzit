@@ -33,6 +33,14 @@ export interface GameRound {
   maxTime: number;
   isActive: boolean;
   guessedPlayers: Set<string>;
+  scoreUpdates?: Array<{
+    playerId: string;
+    playerName: string;
+    pointsEarned: number;
+    drawerId: string;
+    drawerName?: string;
+    drawerPointsEarned: number;
+  }>;
 }
 
 export interface GameRoom {

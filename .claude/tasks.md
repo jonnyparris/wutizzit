@@ -64,8 +64,11 @@
 ---
 
 ## 🌟 Stretch Goals
-- [ ] Word selection menu (drawer picks from 3 words).
+- [x] Word selection menu (drawer picks from 3 words).
 - [ ] Persistent high scores using KV storage.
-- [ ] Emoji reactions in chat.
-- [ ] Drawing tools (colors, eraser, brush size).
-- [ ] Room codes & lobby screen.
+- [x] Emoji reactions in chat.
+- [x] Drawing tools (colors, eraser, brush size, undo, fill).
+- [x] Room codes & lobby screen.
+- [x] Custom word lists and round counts.
+- [x] Pause/resume functionality.
+- [x] Homepage stats and active game links.

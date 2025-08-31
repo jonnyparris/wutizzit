@@ -142,6 +142,9 @@ export class GameRoomObject extends DurableObject {
     if (this.currentRound && this.currentRound.drawerId === playerId) {
       this.endRound();
     }
+    
+    // Check if all players have left and end game if needed
+    this.checkAndHandleEmptyRoom();
 
     return Response.json({ success: true });
   }
@@ -251,18 +254,17 @@ export class GameRoomObject extends DurableObject {
         drawer.score += 50;
       }
 
-      // Broadcast score update immediately
-      this.broadcast({
-        type: 'score-update',
-        data: {
-          playerId: playerId,
-          newScore: player.score,
-          pointsEarned: 100 + timeBonus,
-          drawerId: this.currentRound.drawerId,
-          drawerScore: drawer?.score,
-          drawerPointsEarned: 50
-        },
-        timestamp: Date.now()
+      // Store score updates for round-end summary (no live updates)
+      if (!this.currentRound.scoreUpdates) {
+        this.currentRound.scoreUpdates = [];
+      }
+      this.currentRound.scoreUpdates.push({
+        playerId: playerId,
+        playerName: player.username,
+        pointsEarned: 100 + timeBonus,
+        drawerId: this.currentRound.drawerId,
+        drawerName: drawer?.username,
+        drawerPointsEarned: 50
       });
 
       // Check if all players guessed
@@ -426,7 +428,8 @@ export class GameRoomObject extends DurableObject {
           data: {
             word: shouldRevealWord ? roundData?.word : '???',
             scores: Object.fromEntries(this.players),
-            revealed: shouldRevealWord
+            revealed: shouldRevealWord,
+            scoreUpdates: roundData?.scoreUpdates || []
           },
           timestamp: Date.now()
         };
@@ -469,6 +472,9 @@ export class GameRoomObject extends DurableObject {
       if (this.currentRound && this.currentRound.drawerId === playerId) {
         this.endRound();
       }
+      
+      // Check if all players have left and end game if needed
+      this.checkAndHandleEmptyRoom();
     }
   }
 
@@ -496,6 +502,9 @@ export class GameRoomObject extends DurableObject {
         guessedPlayers: [...this.currentRound.guessedPlayers]
       } : null,
       isGameActive: this.isGameActive,
+      currentRoundNumber: this.currentRoundNumber,
+      maxRounds: this.maxRounds,
+      gameStarted: this.gameStarted,
       chatMessages: this.chatMessages.slice(-50) // Last 50 messages
     };
   }
@@ -506,6 +515,31 @@ export class GameRoomObject extends DurableObject {
       return getRandomWord(); // Fallback to default words
     }
     return wordList[Math.floor(Math.random() * wordList.length)];
+  }
+
+  private checkAndHandleEmptyRoom() {
+    const connectedPlayers = [...this.players.values()].filter(p => p.isConnected);
+    
+    if (connectedPlayers.length === 0) {
+      // All players have left, end the game immediately
+      if (this.roundTimer) {
+        clearInterval(this.roundTimer);
+        this.roundTimer = null;
+      }
+      
+      this.currentRound = null;
+      this.isGameActive = false;
+      this.gameStarted = false;
+      this.currentRoundNumber = 0;
+      this.lastDrawerIndex = -1;
+      
+      // Clear all player scores
+      this.players.forEach(player => {
+        player.score = 0;
+      });
+      
+      console.log('All players left, game ended and reset');
+    }
   }
 
   private endGame() {

@@ -242,7 +242,21 @@
                         <div id="drawing-tools" class="flex gap-2 mb-4 hidden">
                             <div class="flex items-center gap-2">
                                 <label class="text-sm">Color:</label>
-                                <input type="color" id="color-picker" value="#000000" class="w-8 h-8 rounded">
+                                <div id="color-picker-grid" class="grid grid-cols-6 gap-1">
+                                    <div class="color-swatch w-6 h-6 rounded cursor-pointer border-2 border-gray-800" data-color="#000000" style="background-color: #000000;"></div>
+                                    <div class="color-swatch w-6 h-6 rounded cursor-pointer border-2 border-transparent" data-color="#FF0000" style="background-color: #FF0000;"></div>
+                                    <div class="color-swatch w-6 h-6 rounded cursor-pointer border-2 border-transparent" data-color="#00FF00" style="background-color: #00FF00;"></div>
+                                    <div class="color-swatch w-6 h-6 rounded cursor-pointer border-2 border-transparent" data-color="#0000FF" style="background-color: #0000FF;"></div>
+                                    <div class="color-swatch w-6 h-6 rounded cursor-pointer border-2 border-transparent" data-color="#FFFF00" style="background-color: #FFFF00;"></div>
+                                    <div class="color-swatch w-6 h-6 rounded cursor-pointer border-2 border-transparent" data-color="#FF00FF" style="background-color: #FF00FF;"></div>
+                                    <div class="color-swatch w-6 h-6 rounded cursor-pointer border-2 border-transparent" data-color="#00FFFF" style="background-color: #00FFFF;"></div>
+                                    <div class="color-swatch w-6 h-6 rounded cursor-pointer border-2 border-transparent" data-color="#FFA500" style="background-color: #FFA500;"></div>
+                                    <div class="color-swatch w-6 h-6 rounded cursor-pointer border-2 border-transparent" data-color="#800080" style="background-color: #800080;"></div>
+                                    <div class="color-swatch w-6 h-6 rounded cursor-pointer border-2 border-transparent" data-color="#FFC0CB" style="background-color: #FFC0CB;"></div>
+                                    <div class="color-swatch w-6 h-6 rounded cursor-pointer border-2 border-transparent" data-color="#A0522D" style="background-color: #A0522D;"></div>
+                                    <div class="color-swatch w-6 h-6 rounded cursor-pointer border-2 border-transparent" data-color="#808080" style="background-color: #808080;"></div>
+                                </div>
+                                <input type="hidden" id="color-picker" value="#000000">
                             </div>
                             <div class="flex items-center gap-2">
                                 <label class="text-sm">Size:</label>
@@ -292,9 +306,10 @@
                             />
                             <button 
                                 id="send-chat" 
-                                class="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                class="px-3 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 whitespace-nowrap"
+                                title="Send message"
                             >
-                                Send
+                                📤
                             </button>
                         </div>
                     </div>

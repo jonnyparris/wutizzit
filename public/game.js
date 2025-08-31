@@ -7,6 +7,7 @@ class GameClient {
         this.isDrawing = false;
         this.canvas = null;
         this.ctx = null;
+        this.audioContext = null;
         
         this.init();
     }
@@ -17,35 +18,100 @@ class GameClient {
         this.setupCanvas();
         this.generateRandomUsername();
         this.updateHomePageStats();
+        this.initAudio();
+    }
+
+    initAudio() {
+        try {
+            this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        } catch (error) {
+            console.warn('Audio not supported:', error);
+        }
+    }
+
+    playSound(frequency, duration = 200, type = 'sine') {
+        if (!this.audioContext) return;
+        
+        try {
+            const oscillator = this.audioContext.createOscillator();
+            const gainNode = this.audioContext.createGain();
+            
+            oscillator.connect(gainNode);
+            gainNode.connect(this.audioContext.destination);
+            
+            oscillator.frequency.setValueAtTime(frequency, this.audioContext.currentTime);
+            oscillator.type = type;
+            
+            gainNode.gain.setValueAtTime(0.1, this.audioContext.currentTime);
+            gainNode.gain.exponentialRampToValueAtTime(0.01, this.audioContext.currentTime + duration / 1000);
+            
+            oscillator.start(this.audioContext.currentTime);
+            oscillator.stop(this.audioContext.currentTime + duration / 1000);
+        } catch (error) {
+            console.warn('Failed to play sound:', error);
+        }
+    }
+
+    playSoundEffect(effect) {
+        switch (effect) {
+            case 'correct-guess':
+                this.playSound(523, 300); // C5 note
+                setTimeout(() => this.playSound(659, 300), 100); // E5 note
+                setTimeout(() => this.playSound(784, 400), 200); // G5 note
+                break;
+            case 'wrong-guess':
+                this.playSound(200, 150); // Low buzz
+                break;
+            case 'round-end':
+                this.playSound(330, 200); // E4
+                setTimeout(() => this.playSound(262, 400), 300); // C4
+                break;
+            case 'game-start':
+                this.playSound(392, 150); // G4
+                setTimeout(() => this.playSound(523, 150), 200); // C5
+                setTimeout(() => this.playSound(659, 300), 400); // E5
+                break;
+            case 'player-join':
+                this.playSound(440, 150); // A4
+                break;
+            case 'timer-warning':
+                this.playSound(800, 100); // High beep
+                break;
+        }
     }
 
     async updateHomePageStats() {
         try {
-            const response = await fetch('/api/stats');
-            const stats = await response.json();
+            const [statsResponse, gamesResponse] = await Promise.all([
+                fetch('/api/stats'),
+                fetch('/api/active-games')
+            ]);
+            
+            const stats = await statsResponse.json();
+            const activeGamesData = await gamesResponse.json();
             
             document.getElementById('active-games').textContent = stats.activeGames || 0;
             document.getElementById('total-players').textContent = stats.totalPlayers || 0;
             
-            // Mock active games for now - could be enhanced with real game data
+            // Show real active games
             const gamesContainer = document.getElementById('games-container');
             const activeGamesList = document.getElementById('active-games-list');
             
-            const mockGames = [
-                { id: 'ABC123', players: 4, round: 3 },
-                { id: 'XYZ789', players: 6, round: 1 }
-            ];
-            
-            if (stats.activeGames > 0 && Math.random() > 0.3) { // Show games if there are active ones
+            if (activeGamesData.games && activeGamesData.games.length > 0) {
                 gamesContainer.innerHTML = '';
-                mockGames.slice(0, Math.min(stats.activeGames, 2)).forEach(game => {
+                activeGamesData.games.forEach(game => {
                     const gameDiv = document.createElement('div');
                     gameDiv.className = 'p-2 bg-white rounded border cursor-pointer hover:bg-gray-50';
+                    
+                    const statusText = game.gameStarted 
+                        ? `${game.players} players • Round ${game.round}/${game.maxRounds}`
+                        : `${game.players} players • Waiting to start`;
+                    
                     gameDiv.innerHTML = `
                         <div class="flex justify-between items-center">
                             <div>
                                 <div class="font-medium text-sm">${game.id}</div>
-                                <div class="text-xs text-gray-500">${game.players} players • Round ${game.round}</div>
+                                <div class="text-xs text-gray-500">${statusText}</div>
                             </div>
                             <button class="px-2 py-1 bg-blue-500 text-white text-xs rounded hover:bg-blue-600">
                                 Join
@@ -59,35 +125,44 @@ class GameClient {
                     gamesContainer.appendChild(gameDiv);
                 });
                 activeGamesList.classList.remove('hidden');
+            } else {
+                activeGamesList.classList.add('hidden');
             }
         } catch (error) {
             console.error('Failed to fetch stats:', error);
             // Fallback to static numbers
-            document.getElementById('active-games').textContent = '3';
-            document.getElementById('total-players').textContent = '12';
+            document.getElementById('active-games').textContent = '0';
+            document.getElementById('total-players').textContent = '0';
         }
     }
 
     generateRandomUsername() {
         const adjectives = [
-            'Sneezy', 'Giggly', 'Wobbly', 'Bouncy', 'Silly', 'Grumpy', 'Sleepy', 'Dizzy',
-            'Fuzzy', 'Sparkly', 'Goofy', 'Quirky', 'Zany', 'Wacky', 'Bonkers', 'Loopy',
-            'Nutty', 'Bizarre', 'Peculiar', 'Odd', 'Weird', 'Strange', 'Funky', 'Wild'
+            'Sneaky', 'Mighty', 'Swift', 'Brave', 'Clever', 'Cosmic', 'Magic', 'Royal',
+            'Silent', 'Golden', 'Silver', 'Wild', 'Dancing', 'Singing', 'Flying', 'Wise',
+            'Ancient', 'Mysterious', 'Legendary', 'Epic', 'Daring', 'Fearless', 'Noble'
         ];
         
-        const nouns = [
-            'Banana', 'Pickle', 'Waffle', 'Muffin', 'Cookie', 'Donut', 'Pancake', 'Taco',
-            'Burrito', 'Sandwich', 'Pretzel', 'Bagel', 'Cupcake', 'Brownie', 'Nugget',
-            'Penguin', 'Flamingo', 'Unicorn', 'Dragon', 'Ninja', 'Pirate', 'Robot', 'Alien',
-            'Hamster', 'Sloth', 'Llama', 'Potato', 'Carrot', 'Broccoli', 'Dinosaur'
+        const celebrities = [
+            // Historical Figures
+            'Einstein', 'Cleopatra', 'Napoleon', 'Shakespeare', 'DaVinci', 'Mozart', 'Beethoven',
+            // Fictional Characters
+            'Gandalf', 'Yoda', 'Batman', 'Superman', 'Hermione', 'Dumbledore', 'Sherlock',
+            'Aragorn', 'Legolas', 'Frodo', 'Spiderman', 'Ironman', 'Thor', 'Hulk',
+            'Pikachu', 'Mario', 'Luigi', 'Zelda', 'Link', 'Sonic', 'Kirby',
+            'Elsa', 'Anna', 'Simba', 'Nemo', 'Woody', 'Buzz', 'Shrek', 'Donkey',
+            'Mickey', 'Minnie', 'Donald', 'Goofy', 'Scrooge', 'Winnie', 'Tigger',
+            'Garfield', 'Snoopy', 'Charlie', 'Homer', 'Bart', 'Lisa', 'Marge',
+            // Mythological
+            'Zeus', 'Athena', 'Apollo', 'Artemis', 'Hercules', 'Perseus', 'Achilles',
+            'Odin', 'Thor', 'Loki', 'Freya', 'Merlin', 'Arthur', 'Excalibur'
         ];
         
         const adjective = adjectives[Math.floor(Math.random() * adjectives.length)];
-        const noun = nouns[Math.floor(Math.random() * nouns.length)];
-        const number = Math.floor(Math.random() * 100) + 1;
+        const celebrity = celebrities[Math.floor(Math.random() * celebrities.length)];
         
-        this.usernameInput.placeholder = `e.g. ${adjective}${noun}${number}`;
-        this.usernameInput.value = `${adjective}${noun}${number}`;
+        this.usernameInput.placeholder = `e.g. ${adjective}${celebrity}`;
+        this.usernameInput.value = `${adjective}${celebrity}`;
     }
 
     generatePlayerAvatar(playerId) {
@@ -204,6 +279,13 @@ class GameClient {
         this.saveWordsBtn.addEventListener('click', () => this.saveCustomWords());
         this.cancelWordsBtn.addEventListener('click', () => this.closeWordListModal());
         this.pauseGameBtn.addEventListener('click', () => this.togglePauseGame());
+        
+        // Color picker event listeners
+        document.addEventListener('click', (e) => {
+            if (e.target.classList.contains('color-swatch')) {
+                this.selectColor(e.target.dataset.color);
+            }
+        });
     }
 
     setupCanvas() {
@@ -440,9 +522,6 @@ class GameClient {
             case 'timer-update':
                 this.handleTimerUpdate(message.data);
                 break;
-            case 'score-update':
-                this.handleScoreUpdate(message.data);
-                break;
             case 'round-end':
                 this.handleRoundEnd(message.data);
                 break;
@@ -462,9 +541,22 @@ class GameClient {
         // Store players data for score updates
         this.playersData = gameState.players;
         this.updatePlayersList(gameState.players);
+        
+        // Update round info even when no active round
+        if (gameState.maxRounds) {
+            this.maxRounds = gameState.maxRounds;
+        }
+        
         if (gameState.currentRound) {
             this.updateRound(gameState.currentRound);
+        } else if (gameState.gameStarted && gameState.currentRoundNumber !== undefined) {
+            // Show current round info even between rounds
+            this.roundInfo.textContent = `Round ${gameState.currentRoundNumber} of ${this.maxRounds}`;
+        } else {
+            // Before game starts
+            this.roundInfo.textContent = `Round 0 of ${this.maxRounds}`;
         }
+        
         if (gameState.chatMessages) {
             this.updateChat(gameState.chatMessages);
         }
@@ -534,6 +626,7 @@ class GameClient {
             timestamp: Date.now(),
             isGuess: false
         });
+        this.playSoundEffect('player-join');
     }
 
     handlePlayerLeave(data) {
@@ -582,11 +675,26 @@ class GameClient {
 
     handleGuess(message) {
         this.addChatMessage(message);
+        
+        // Play sound effects for correct/wrong guesses
+        if (message.isCorrect) {
+            this.playSoundEffect('correct-guess');
+        } else if (message.playerId === this.playerId) {
+            // Only play wrong sound for own guesses to avoid spam
+            this.playSoundEffect('wrong-guess');
+        }
+        
+        // If this player guessed correctly, disable further guessing
+        if (message.isCorrect && message.playerId === this.playerId) {
+            this.chatInput.disabled = true;
+            this.chatInput.placeholder = 'You guessed correctly! Wait for next round...';
+        }
     }
 
     handleRoundStart(data) {
         this.clearCanvas();
         this.isDrawer = data.drawerId === this.playerId;
+        this.playSoundEffect('game-start');
         
         // Update max rounds if provided by server
         if (data.maxRounds) {
@@ -636,50 +744,13 @@ class GameClient {
 
     handleTimerUpdate(data) {
         this.updateTimer(data.timeLeft);
+        
+        // Play warning sound when 10 seconds left
+        if (data.timeLeft === 10000) {
+            this.playSoundEffect('timer-warning');
+        }
     }
 
-    handleScoreUpdate(data) {
-        // Update player scores in the stored data
-        if (this.playersData) {
-            if (data.playerId && this.playersData[data.playerId]) {
-                this.playersData[data.playerId].score = data.newScore;
-            }
-            if (data.drawerId && data.drawerScore && this.playersData[data.drawerId]) {
-                this.playersData[data.drawerId].score = data.drawerScore;
-            }
-            
-            // Refresh player list display
-            this.updatePlayersList(this.playersData);
-        }
-        
-        // Show score notification
-        if (data.playerId && data.pointsEarned) {
-            const playerName = this.playersData?.[data.playerId]?.username || 'Player';
-            this.addChatMessage({
-                username: 'System',
-                message: `🎉 ${playerName} scored! (+${data.pointsEarned} points)`,
-                timestamp: Date.now(),
-                isGuess: false
-            });
-            
-            // If current player guessed correctly, disable further guessing
-            if (data.playerId === this.playerId) {
-                this.chatInput.disabled = true;
-                this.chatInput.placeholder = 'You guessed correctly! Wait for next round...';
-            }
-        }
-        
-        // Show drawer score notification
-        if (data.drawerId && data.drawerPointsEarned && data.drawerId !== data.playerId) {
-            const drawerName = this.playersData?.[data.drawerId]?.username || 'Drawer';
-            this.addChatMessage({
-                username: 'System',
-                message: `🎨 ${drawerName} earned points for drawing! (+${data.drawerPointsEarned} points)`,
-                timestamp: Date.now(),
-                isGuess: false
-            });
-        }
-    }
 
     handleRoundEnd(data) {
         const wordDisplay = data.revealed ? data.word : 'Hidden (you didn\'t guess correctly)';
@@ -689,6 +760,63 @@ class GameClient {
             timestamp: Date.now(),
             isGuess: false
         });
+        this.playSoundEffect('round-end');
+        
+        // Update scores with final data
+        if (data.scores) {
+            this.playersData = data.scores;
+            this.updatePlayersList(this.playersData);
+        }
+        
+        // Show score summary if there were any score updates
+        if (data.scoreUpdates && data.scoreUpdates.length > 0) {
+            this.addChatMessage({
+                username: 'System',
+                message: '🏆 Round Summary:',
+                timestamp: Date.now(),
+                isGuess: false
+            });
+            
+            // Group updates by unique players (in case someone guessed multiple times)
+            const playerUpdates = new Map();
+            let drawerUpdate = null;
+            
+            data.scoreUpdates.forEach(update => {
+                if (!playerUpdates.has(update.playerId)) {
+                    playerUpdates.set(update.playerId, {
+                        name: update.playerName,
+                        points: update.pointsEarned
+                    });
+                }
+                
+                if (update.drawerName && !drawerUpdate) {
+                    drawerUpdate = {
+                        name: update.drawerName,
+                        points: update.drawerPointsEarned
+                    };
+                }
+            });
+            
+            // Show player score updates
+            playerUpdates.forEach(update => {
+                this.addChatMessage({
+                    username: 'System',
+                    message: `  🎉 ${update.name}: +${update.points} points`,
+                    timestamp: Date.now(),
+                    isGuess: false
+                });
+            });
+            
+            // Show drawer score update
+            if (drawerUpdate) {
+                this.addChatMessage({
+                    username: 'System',
+                    message: `  🎨 ${drawerUpdate.name}: +${drawerUpdate.points} points (drawing)`,
+                    timestamp: Date.now(),
+                    isGuess: false
+                });
+            }
+        }
     }
 
     handleWordChoice(data) {
@@ -882,6 +1010,24 @@ class GameClient {
             this.fillToolBtn.classList.remove('bg-green-700', 'ring-2', 'ring-green-300');
             this.fillToolBtn.classList.add('bg-green-500');
             this.canvas.style.cursor = this.isDrawer ? 'crosshair' : 'not-allowed';
+        }
+    }
+
+    selectColor(color) {
+        // Update the hidden input value
+        this.colorPicker.value = color;
+        
+        // Update visual selection - remove border from all swatches
+        document.querySelectorAll('.color-swatch').forEach(swatch => {
+            swatch.classList.remove('border-gray-800');
+            swatch.classList.add('border-transparent');
+        });
+        
+        // Add border to selected swatch
+        const selectedSwatch = document.querySelector(`[data-color="${color}"]`);
+        if (selectedSwatch) {
+            selectedSwatch.classList.remove('border-transparent');
+            selectedSwatch.classList.add('border-gray-800');
         }
     }
 
