@@ -1,20 +1,154 @@
 <!DOCTYPE html>
 <html lang="en">
-	<head>
-		<meta charset="UTF-8" />
-		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-		<title>Hello, World!</title>
-	</head>
-	<body>
-		<h1 id="heading"></h1>
-		<p>This page comes from a static asset stored at `public/index.html` as configured in `wrangler.jsonc`.</p>
-		<script>
-			fetch('/message')
-				.then((resp) => resp.text())
-				.then((text) => {
-					const h1 = document.getElementById('heading');
-					h1.textContent = text;
-				});
-		</script>
-	</body>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Wutizzit - Drawing Game</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .canvas-container {
+            border: 2px solid #e5e7eb;
+            border-radius: 8px;
+        }
+        .drawing-canvas {
+            cursor: crosshair;
+        }
+        .disabled-canvas {
+            cursor: not-allowed;
+            opacity: 0.6;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen">
+    <div id="app" class="container mx-auto px-4 py-8">
+        <!-- Home Screen -->
+        <div id="home-screen" class="max-w-md mx-auto bg-white rounded-lg shadow-lg p-8">
+            <h1 class="text-4xl font-bold text-center mb-8 text-blue-600">Wutizzit</h1>
+            <div class="space-y-4">
+                <input 
+                    type="text" 
+                    id="username-input" 
+                    placeholder="Enter your username" 
+                    class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    maxlength="20"
+                />
+                <div class="flex gap-2">
+                    <input 
+                        type="text" 
+                        id="room-input" 
+                        placeholder="Room ID (optional)" 
+                        class="flex-1 px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        maxlength="6"
+                    />
+                    <button 
+                        id="join-room-btn" 
+                        class="px-6 py-3 bg-green-600 text-white rounded-lg hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500"
+                    >
+                        Join
+                    </button>
+                </div>
+                <button 
+                    id="create-room-btn" 
+                    class="w-full px-4 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                    Create New Room
+                </button>
+            </div>
+        </div>
+
+        <!-- Game Screen -->
+        <div id="game-screen" class="hidden">
+            <div class="flex flex-col lg:flex-row gap-6">
+                <!-- Main Game Area -->
+                <div class="flex-1">
+                    <!-- Game Header -->
+                    <div class="bg-white rounded-lg shadow p-4 mb-4">
+                        <div class="flex justify-between items-center">
+                            <div>
+                                <h2 class="text-xl font-bold">Room: <span id="room-id-display"></span></h2>
+                                <p id="game-status" class="text-gray-600">Waiting for players...</p>
+                            </div>
+                            <div class="text-right">
+                                <div id="timer" class="text-2xl font-bold text-red-600">0:00</div>
+                                <div id="round-info" class="text-sm text-gray-600">Round 0</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Drawing Area -->
+                    <div class="bg-white rounded-lg shadow p-4 mb-4">
+                        <div id="word-display" class="text-center mb-4 hidden">
+                            <p class="text-lg font-semibold">Your word: <span id="current-word" class="text-blue-600"></span></p>
+                        </div>
+                        
+                        <!-- Drawing Tools -->
+                        <div id="drawing-tools" class="flex gap-2 mb-4 hidden">
+                            <div class="flex items-center gap-2">
+                                <label class="text-sm">Color:</label>
+                                <input type="color" id="color-picker" value="#000000" class="w-8 h-8 rounded">
+                            </div>
+                            <div class="flex items-center gap-2">
+                                <label class="text-sm">Size:</label>
+                                <input type="range" id="brush-size" min="1" max="20" value="3" class="w-24">
+                            </div>
+                            <button id="clear-canvas" class="px-3 py-1 bg-red-500 text-white rounded hover:bg-red-600">
+                                Clear
+                            </button>
+                        </div>
+                        
+                        <div class="canvas-container bg-white">
+                            <canvas 
+                                id="game-canvas" 
+                                width="800" 
+                                height="500" 
+                                class="w-full h-auto drawing-canvas"
+                            ></canvas>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Sidebar -->
+                <div class="w-full lg:w-80 space-y-4">
+                    <!-- Players List -->
+                    <div class="bg-white rounded-lg shadow p-4">
+                        <h3 class="font-bold text-lg mb-3">Players</h3>
+                        <div id="players-list" class="space-y-2"></div>
+                    </div>
+
+                    <!-- Chat -->
+                    <div class="bg-white rounded-lg shadow p-4">
+                        <h3 class="font-bold text-lg mb-3">Chat</h3>
+                        <div id="chat-messages" class="h-48 overflow-y-auto border border-gray-200 rounded p-2 mb-3 space-y-1"></div>
+                        <div class="flex gap-2">
+                            <input 
+                                type="text" 
+                                id="chat-input" 
+                                placeholder="Type your guess..." 
+                                class="flex-1 px-3 py-2 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                maxlength="100"
+                            />
+                            <button 
+                                id="send-chat" 
+                                class="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            >
+                                Send
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="mt-4 text-center">
+                <button 
+                    id="leave-room-btn" 
+                    class="px-6 py-2 bg-red-600 text-white rounded hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500"
+                >
+                    Leave Room
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/game.js"></script>
+</body>
 </html>
