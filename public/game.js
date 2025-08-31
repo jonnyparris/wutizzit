@@ -15,6 +15,88 @@ class GameClient {
         this.setupElements();
         this.setupEventListeners();
         this.setupCanvas();
+        this.generateRandomUsername();
+        this.updateHomePageStats();
+    }
+
+    updateHomePageStats() {
+        // Simple mock stats for now
+        document.getElementById('active-games').textContent = Math.floor(Math.random() * 5) + 2;
+        document.getElementById('total-players').textContent = Math.floor(Math.random() * 20) + 8;
+        
+        // Mock active games
+        const gamesContainer = document.getElementById('games-container');
+        const activeGamesList = document.getElementById('active-games-list');
+        
+        const mockGames = [
+            { id: 'ABC123', players: 4, round: 3 },
+            { id: 'XYZ789', players: 6, round: 1 }
+        ];
+        
+        if (Math.random() > 0.3) { // 70% chance to show games
+            gamesContainer.innerHTML = '';
+            mockGames.forEach(game => {
+                const gameDiv = document.createElement('div');
+                gameDiv.className = 'p-2 bg-white rounded border cursor-pointer hover:bg-gray-50';
+                gameDiv.innerHTML = `
+                    <div class="flex justify-between items-center">
+                        <div>
+                            <div class="font-medium text-sm">${game.id}</div>
+                            <div class="text-xs text-gray-500">${game.players} players • Round ${game.round}</div>
+                        </div>
+                        <button class="px-2 py-1 bg-blue-500 text-white text-xs rounded hover:bg-blue-600">
+                            Join
+                        </button>
+                    </div>
+                `;
+                gameDiv.onclick = () => {
+                    this.roomInput.value = game.id;
+                    this.joinRoom(game.id);
+                };
+                gamesContainer.appendChild(gameDiv);
+            });
+            activeGamesList.classList.remove('hidden');
+        }
+    }
+
+    generateRandomUsername() {
+        const adjectives = [
+            'Sneezy', 'Giggly', 'Wobbly', 'Bouncy', 'Silly', 'Grumpy', 'Sleepy', 'Dizzy',
+            'Fuzzy', 'Sparkly', 'Goofy', 'Quirky', 'Zany', 'Wacky', 'Bonkers', 'Loopy',
+            'Nutty', 'Bizarre', 'Peculiar', 'Odd', 'Weird', 'Strange', 'Funky', 'Wild'
+        ];
+        
+        const nouns = [
+            'Banana', 'Pickle', 'Waffle', 'Muffin', 'Cookie', 'Donut', 'Pancake', 'Taco',
+            'Burrito', 'Sandwich', 'Pretzel', 'Bagel', 'Cupcake', 'Brownie', 'Nugget',
+            'Penguin', 'Flamingo', 'Unicorn', 'Dragon', 'Ninja', 'Pirate', 'Robot', 'Alien',
+            'Hamster', 'Sloth', 'Llama', 'Potato', 'Carrot', 'Broccoli', 'Dinosaur'
+        ];
+        
+        const adjective = adjectives[Math.floor(Math.random() * adjectives.length)];
+        const noun = nouns[Math.floor(Math.random() * nouns.length)];
+        const number = Math.floor(Math.random() * 100) + 1;
+        
+        this.usernameInput.placeholder = `e.g. ${adjective}${noun}${number}`;
+        this.usernameInput.value = `${adjective}${noun}${number}`;
+    }
+
+    generatePlayerAvatar(playerId) {
+        const avatars = [
+            '🐱', '🐶', '🐭', '🐹', '🐰', '🦊', '🐻', '🐼', '🐨', '🐯', 
+            '🦁', '🐮', '🐷', '🐸', '🐵', '🐔', '🐧', '🐦', '🐤', '🦆',
+            '🦋', '🐛', '🐝', '🐞', '🦄', '🐲', '👽', '🤖', '🎭', '🎪'
+        ];
+        
+        // Use playerId as seed for consistent avatar per player
+        let hash = 0;
+        for (let i = 0; i < playerId.length; i++) {
+            const char = playerId.charCodeAt(i);
+            hash = ((hash << 5) - hash) + char;
+            hash = hash & hash; // Convert to 32bit integer
+        }
+        
+        return avatars[Math.abs(hash) % avatars.length];
     }
 
     setupElements() {
@@ -33,21 +115,51 @@ class GameClient {
         this.roundInfo = document.getElementById('round-info');
         this.wordDisplay = document.getElementById('word-display');
         this.currentWord = document.getElementById('current-word');
+        this.wordHint = document.getElementById('word-hint');
+        this.hintText = document.getElementById('hint-text');
+        this.wordChoice = document.getElementById('word-choice');
+        this.choiceTimer = document.getElementById('choice-timer');
+        this.wordChoice1 = document.getElementById('word-choice-1');
+        this.wordChoice2 = document.getElementById('word-choice-2');
+        this.wordChoice3 = document.getElementById('word-choice-3');
         this.drawingTools = document.getElementById('drawing-tools');
         this.playersListContainer = document.getElementById('players-list');
         this.chatMessages = document.getElementById('chat-messages');
         this.chatInput = document.getElementById('chat-input');
         this.sendChatBtn = document.getElementById('send-chat');
         this.leaveRoomBtn = document.getElementById('leave-room-btn');
+        this.startGameBtn = document.getElementById('start-game-btn');
 
         // Drawing tools
         this.colorPicker = document.getElementById('color-picker');
         this.brushSize = document.getElementById('brush-size');
         this.clearCanvasBtn = document.getElementById('clear-canvas');
+        this.undoCanvasBtn = document.getElementById('undo-canvas');
+        this.fillToolBtn = document.getElementById('fill-tool');
 
         // Canvas
         this.canvas = document.getElementById('game-canvas');
         this.ctx = this.canvas.getContext('2d');
+
+        // Game settings (for room creator)
+        this.gameSettings = document.getElementById('game-settings');
+        this.roundsSetting = document.getElementById('rounds-setting');
+        this.wordListBtn = document.getElementById('word-list-btn');
+        this.wordListModal = document.getElementById('word-list-modal');
+        this.customWordsTextarea = document.getElementById('custom-words');
+        this.saveWordsBtn = document.getElementById('save-words-btn');
+        this.cancelWordsBtn = document.getElementById('cancel-words-btn');
+        this.pauseGameBtn = document.getElementById('pause-game-btn');
+        
+        // Canvas state stack for undo functionality
+        this.canvasStates = [];
+        this.maxUndoStates = 20;
+        
+        // Fill tool state
+        this.fillMode = false;
+        
+        // Game settings
+        this.maxRounds = 10; // Default, will be updated by server
     }
 
     setupEventListeners() {
@@ -74,6 +186,15 @@ class GameClient {
         this.sendChatBtn.addEventListener('click', () => this.sendMessage());
         this.leaveRoomBtn.addEventListener('click', () => this.leaveRoom());
         this.clearCanvasBtn.addEventListener('click', () => this.clearCanvas());
+        this.undoCanvasBtn.addEventListener('click', () => this.undoCanvas());
+        this.fillToolBtn.addEventListener('click', () => this.toggleFillTool());
+        this.startGameBtn.addEventListener('click', () => this.startGame());
+        
+        // Game settings event listeners
+        this.wordListBtn.addEventListener('click', () => this.openWordListModal());
+        this.saveWordsBtn.addEventListener('click', () => this.saveCustomWords());
+        this.cancelWordsBtn.addEventListener('click', () => this.closeWordListModal());
+        this.pauseGameBtn.addEventListener('click', () => this.togglePauseGame());
     }
 
     setupCanvas() {
@@ -106,8 +227,17 @@ class GameClient {
         // Mouse events
         this.canvas.addEventListener('mousedown', (e) => {
             if (!this.isDrawer) return;
-            this.isDrawing = true;
+            
             const pos = getMousePos(e);
+            
+            if (this.fillMode) {
+                this.saveCanvasState(); // Save state before fill
+                this.floodFill(Math.floor(pos.x), Math.floor(pos.y));
+                return;
+            }
+            
+            this.saveCanvasState(); // Save state before drawing
+            this.isDrawing = true;
             lastX = pos.x;
             lastY = pos.y;
         });
@@ -128,8 +258,17 @@ class GameClient {
         this.canvas.addEventListener('touchstart', (e) => {
             e.preventDefault();
             if (!this.isDrawer) return;
-            this.isDrawing = true;
+            
             const pos = getTouchPos(e);
+            
+            if (this.fillMode) {
+                this.saveCanvasState(); // Save state before fill
+                this.floodFill(Math.floor(pos.x), Math.floor(pos.y));
+                return;
+            }
+            
+            this.saveCanvasState(); // Save state before drawing
+            this.isDrawing = true;
             lastX = pos.x;
             lastY = pos.y;
         });
@@ -204,10 +343,18 @@ class GameClient {
             if (response.ok) {
                 this.playerId = data.playerId;
                 this.roomId = roomId;
+                this.isCreator = data.isCreator;
                 this.roomIdDisplay.textContent = roomId;
                 
                 this.showGameScreen();
                 this.connectWebSocket(data.websocketUrl || `/rooms/${roomId}/ws?playerId=${this.playerId}`);
+                
+                // Show start button and settings for room creator
+                if (data.isCreator && !data.gameStarted) {
+                    this.startGameBtn.classList.remove('hidden');
+                    this.gameSettings.classList.remove('hidden');
+                    this.gameStatus.textContent = '⏳ Waiting for more players. You can start the game when ready.';
+                }
             } else {
                 alert(data.error || 'Failed to join room');
             }
@@ -225,20 +372,36 @@ class GameClient {
         
         this.socket.onopen = () => {
             console.log('WebSocket connected');
+            this.gameStatus.textContent = '🔗 Connected! Waiting for game to start...';
         };
         
         this.socket.onmessage = (event) => {
-            const message = JSON.parse(event.data);
-            this.handleMessage(message);
+            try {
+                const message = JSON.parse(event.data);
+                this.handleMessage(message);
+            } catch (error) {
+                console.error('Error parsing WebSocket message:', error);
+            }
         };
         
-        this.socket.onclose = () => {
-            console.log('WebSocket disconnected');
-            this.showHomeScreen();
+        this.socket.onclose = (event) => {
+            console.log('WebSocket disconnected', event.code, event.reason);
+            if (!event.wasClean) {
+                this.gameStatus.textContent = '⚠️ Connection lost. Attempting to reconnect...';
+                // Attempt to reconnect after a delay
+                setTimeout(() => {
+                    if (this.roomId && this.playerId) {
+                        this.connectWebSocket(url);
+                    }
+                }, 2000);
+            } else {
+                this.showHomeScreen();
+            }
         };
         
         this.socket.onerror = (error) => {
             console.error('WebSocket error:', error);
+            this.gameStatus.textContent = '❌ Connection error. Please try refreshing.';
         };
     }
 
@@ -268,13 +431,27 @@ class GameClient {
             case 'timer-update':
                 this.handleTimerUpdate(message.data);
                 break;
+            case 'score-update':
+                this.handleScoreUpdate(message.data);
+                break;
             case 'round-end':
                 this.handleRoundEnd(message.data);
+                break;
+            case 'word-choice':
+                this.handleWordChoice(message.data);
+                break;
+            case 'round-prepare':
+                this.handleRoundPrepare(message.data);
+                break;
+            case 'game-end':
+                this.handleGameEnd(message.data);
                 break;
         }
     }
 
     updateGameState(gameState) {
+        // Store players data for score updates
+        this.playersData = gameState.players;
         this.updatePlayersList(gameState.players);
         if (gameState.currentRound) {
             this.updateRound(gameState.currentRound);
@@ -285,23 +462,39 @@ class GameClient {
     }
 
     updatePlayersList(players) {
+        if (!players) return;
+        
+        // Find the highest score for crown emoji
+        const playerArray = Object.values(players);
+        const maxScore = Math.max(...playerArray.map(p => p.score));
+        
         this.playersListContainer.innerHTML = '';
-        Object.values(players).forEach(player => {
-            const playerDiv = document.createElement('div');
-            playerDiv.className = `flex justify-between items-center p-2 rounded ${
-                player.id === this.playerId ? 'bg-blue-100' : 'bg-gray-50'
-            }`;
-            playerDiv.innerHTML = `
-                <span class="font-medium">${player.username}</span>
-                <span class="text-sm font-bold">${player.score}</span>
-            `;
-            this.playersListContainer.appendChild(playerDiv);
-        });
+        playerArray
+            .sort((a, b) => b.score - a.score) // Sort by score descending
+            .forEach(player => {
+                const isLeader = player.score === maxScore && maxScore > 0;
+                const isCurrentPlayer = player.id === this.playerId;
+                const playerDiv = document.createElement('div');
+                playerDiv.className = `flex justify-between items-center p-3 player-card ${
+                    isCurrentPlayer ? 'ring-2 ring-blue-400 bg-blue-50 border-2 border-blue-300' : ''
+                }`;
+                const avatar = this.generatePlayerAvatar(player.id);
+                playerDiv.innerHTML = `
+                    <div class="flex items-center gap-2">
+                        <span class="text-lg">${avatar}</span>
+                        <span class="font-medium ${isCurrentPlayer ? 'text-blue-700 font-bold' : ''}">
+                            ${isCurrentPlayer ? '👤 ' : ''}${isLeader ? '👑 ' : ''}${player.username}${isCurrentPlayer ? ' (You)' : ''}
+                        </span>
+                    </div>
+                    <span class="text-sm font-bold ${isCurrentPlayer ? 'text-blue-700' : ''}">${player.score}</span>
+                `;
+                this.playersListContainer.appendChild(playerDiv);
+            });
     }
 
     updateRound(round) {
         if (round) {
-            this.roundInfo.textContent = `Round ${round.roundNumber}`;
+            this.roundInfo.textContent = `Round ${round.roundNumber} of ${this.maxRounds}`;
             this.updateTimer(round.timeLeft);
         }
     }
@@ -320,19 +513,30 @@ class GameClient {
     }
 
     handlePlayerJoin(data) {
-        // Player list will be updated via game state
+        // Update players data and refresh list
+        if (this.playersData) {
+            this.playersData[data.player.id] = data.player;
+            this.updatePlayersList(this.playersData);
+        }
+        
         this.addChatMessage({
             username: 'System',
-            message: `${data.player.username} joined the room`,
+            message: `👋 ${data.player.username} joined`,
             timestamp: Date.now(),
             isGuess: false
         });
     }
 
     handlePlayerLeave(data) {
+        // Remove player from stored data and refresh list
+        if (this.playersData && data.playerId) {
+            delete this.playersData[data.playerId];
+            this.updatePlayersList(this.playersData);
+        }
+        
         this.addChatMessage({
             username: 'System',
-            message: `Player left the room`,
+            message: `🚪 Player left the room`,
             timestamp: Date.now(),
             isGuess: false
         });
@@ -341,7 +545,28 @@ class GameClient {
     handleDraw(strokeData) {
         if (strokeData.clear) {
             this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+            // Clear canvas states for other players too
+            this.canvasStates = [];
+            this.updateUndoButton();
+        } else if (strokeData.undo) {
+            // Handle undo from other players
+            if (this.canvasStates.length > 0) {
+                const previousState = this.canvasStates.pop();
+                this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+                this.ctx.putImageData(previousState, 0, 0);
+                this.updateUndoButton();
+            }
+        } else if (strokeData.fill) {
+            // Handle fill from other players
+            if (!this.isDrawer) {
+                this.saveCanvasState();
+            }
+            this.performFillForOtherPlayer(strokeData.x, strokeData.y, strokeData.color);
         } else {
+            // Save state before applying received drawing data (for non-drawer players)
+            if (!this.isDrawer) {
+                this.saveCanvasState();
+            }
             this.drawStrokeOnCanvas(strokeData);
         }
     }
@@ -353,28 +578,40 @@ class GameClient {
     handleRoundStart(data) {
         this.clearCanvas();
         this.isDrawer = data.drawerId === this.playerId;
-        this.roundInfo.textContent = `Round ${data.roundNumber}`;
+        
+        // Update max rounds if provided by server
+        if (data.maxRounds) {
+            this.maxRounds = data.maxRounds;
+        }
+        this.roundInfo.textContent = `Round ${data.roundNumber} of ${this.maxRounds}`;
         this.updateTimer(data.timeLeft);
         
         // Update UI based on role
         if (this.isDrawer) {
             this.drawingTools.classList.remove('hidden');
-            this.gameStatus.textContent = 'You are drawing! Wait for your word...';
+            this.gameStatus.textContent = '🎨 You are drawing! Wait for your word...';
             this.canvas.classList.remove('disabled-canvas');
             this.chatInput.disabled = true;
             this.chatInput.placeholder = 'You cannot guess while drawing';
+            this.wordHint.classList.add('hidden');
         } else {
             this.drawingTools.classList.add('hidden');
             this.wordDisplay.classList.add('hidden');
-            this.gameStatus.textContent = 'Guess the drawing!';
+            this.gameStatus.textContent = '🤔 Guess the drawing!';
             this.canvas.classList.add('disabled-canvas');
             this.chatInput.disabled = false;
             this.chatInput.placeholder = 'Type your guess...';
+            
+            // Show word hint for guessers
+            if (data.wordHint) {
+                this.hintText.textContent = data.wordHint;
+                this.wordHint.classList.remove('hidden');
+            }
         }
         
         this.addChatMessage({
             username: 'System',
-            message: `New round started! Round ${data.roundNumber}`,
+            message: `🎨 Round ${data.roundNumber} started!`,
             timestamp: Date.now(),
             isGuess: false
         });
@@ -384,7 +621,7 @@ class GameClient {
         if (this.isDrawer) {
             this.wordDisplay.classList.remove('hidden');
             this.currentWord.textContent = data.word;
-            this.gameStatus.textContent = 'You are drawing!';
+            this.gameStatus.textContent = '🎨 You are drawing!';
         }
     }
 
@@ -392,13 +629,108 @@ class GameClient {
         this.updateTimer(data.timeLeft);
     }
 
+    handleScoreUpdate(data) {
+        // Update player scores in the stored data
+        if (this.playersData) {
+            if (data.playerId && this.playersData[data.playerId]) {
+                this.playersData[data.playerId].score = data.newScore;
+            }
+            if (data.drawerId && data.drawerScore && this.playersData[data.drawerId]) {
+                this.playersData[data.drawerId].score = data.drawerScore;
+            }
+            
+            // Refresh player list display
+            this.updatePlayersList(this.playersData);
+        }
+        
+        // Show score notification
+        if (data.playerId && data.pointsEarned) {
+            const playerName = this.playersData?.[data.playerId]?.username || 'Player';
+            this.addChatMessage({
+                username: 'System',
+                message: `🎉 ${playerName} scored! (+${data.pointsEarned} points)`,
+                timestamp: Date.now(),
+                isGuess: false
+            });
+            
+            // If current player guessed correctly, disable further guessing
+            if (data.playerId === this.playerId) {
+                this.chatInput.disabled = true;
+                this.chatInput.placeholder = 'You guessed correctly! Wait for next round...';
+            }
+        }
+        
+        // Show drawer score notification
+        if (data.drawerId && data.drawerPointsEarned && data.drawerId !== data.playerId) {
+            const drawerName = this.playersData?.[data.drawerId]?.username || 'Drawer';
+            this.addChatMessage({
+                username: 'System',
+                message: `🎨 ${drawerName} earned points for drawing! (+${data.drawerPointsEarned} points)`,
+                timestamp: Date.now(),
+                isGuess: false
+            });
+        }
+    }
+
     handleRoundEnd(data) {
+        const wordDisplay = data.revealed ? data.word : 'Hidden (you didn\'t guess correctly)';
         this.addChatMessage({
             username: 'System',
-            message: `Round ended! The word was: ${data.word}`,
+            message: `⏰ Round ended! Word: ${wordDisplay}`,
             timestamp: Date.now(),
             isGuess: false
         });
+    }
+
+    handleWordChoice(data) {
+        // Show word choices to drawer
+        this.wordChoice1.textContent = data.wordChoices[0];
+        this.wordChoice2.textContent = data.wordChoices[1];
+        this.wordChoice3.textContent = data.wordChoices[2];
+        
+        this.wordChoice1.onclick = () => this.chooseWord(data.wordChoices[0]);
+        this.wordChoice2.onclick = () => this.chooseWord(data.wordChoices[1]);
+        this.wordChoice3.onclick = () => this.chooseWord(data.wordChoices[2]);
+        
+        this.wordChoice.classList.remove('hidden');
+        this.gameStatus.textContent = '📝 Choose your word to draw!';
+        
+        // Start choice timer
+        let timeLeft = 20;
+        const timer = setInterval(() => {
+            timeLeft--;
+            this.choiceTimer.textContent = `${timeLeft} seconds to choose`;
+            if (timeLeft <= 0) {
+                clearInterval(timer);
+                // Auto-choose first word if time runs out
+                this.chooseWord(data.wordChoices[0]);
+            }
+        }, 1000);
+    }
+
+    handleRoundPrepare(data) {
+        // Update max rounds if provided by server
+        if (data.maxRounds) {
+            this.maxRounds = data.maxRounds;
+        }
+        this.roundInfo.textContent = `Round ${data.roundNumber} of ${this.maxRounds}`;
+        if (data.drawerId === this.playerId) {
+            this.gameStatus.textContent = '🎨 You are the drawer! Waiting for word choice...';
+        } else {
+            this.gameStatus.textContent = '⏳ Waiting for drawer to choose word...';
+        }
+    }
+
+    chooseWord(word) {
+        this.wordChoice.classList.add('hidden');
+        
+        if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+            this.socket.send(JSON.stringify({
+                type: 'word-choice',
+                data: word,
+                timestamp: Date.now()
+            }));
+        }
     }
 
     drawStroke(x1, y1, x2, y2, isNewStroke) {
@@ -456,9 +788,9 @@ class GameClient {
 
     addChatMessage(message) {
         const messageDiv = document.createElement('div');
-        messageDiv.className = `text-sm ${
-            message.isCorrect ? 'text-green-600 font-bold' : 
-            message.username === 'System' ? 'text-gray-500 italic' : 'text-gray-800'
+        messageDiv.className = `chat-bubble text-sm ${
+            message.isCorrect ? 'bg-green-500' : 
+            message.username === 'System' ? 'bg-gray-500' : ''
         }`;
         
         const time = new Date(message.timestamp).toLocaleTimeString('en-US', { 
@@ -468,9 +800,9 @@ class GameClient {
         });
         
         messageDiv.innerHTML = `
-            <span class="text-gray-400 text-xs">[${time}]</span>
+            <span class="opacity-75 text-xs">[${time}]</span>
             <span class="font-medium">${message.username}:</span>
-            ${message.isCorrect ? '✓ ' : ''}${message.message}
+            ${message.isCorrect ? '✅ ' : ''}${message.message}
         `;
         
         this.chatMessages.appendChild(messageDiv);
@@ -488,6 +820,292 @@ class GameClient {
                 timestamp: Date.now()
             }));
         }
+        
+        // Clear canvas states and update undo button
+        this.canvasStates = [];
+        this.updateUndoButton();
+    }
+
+    saveCanvasState() {
+        const imageData = this.ctx.getImageData(0, 0, this.canvas.width, this.canvas.height);
+        this.canvasStates.push(imageData);
+        
+        // Limit the number of saved states
+        if (this.canvasStates.length > this.maxUndoStates) {
+            this.canvasStates.shift();
+        }
+        
+        this.updateUndoButton();
+    }
+
+    undoCanvas() {
+        if (this.canvasStates.length === 0) return;
+        
+        const previousState = this.canvasStates.pop();
+        this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+        this.ctx.putImageData(previousState, 0, 0);
+        
+        this.updateUndoButton();
+        
+        // Send undo command to other players if we're the drawer
+        if (this.isDrawer && this.socket && this.socket.readyState === WebSocket.OPEN) {
+            this.socket.send(JSON.stringify({
+                type: 'draw',
+                data: { undo: true },
+                timestamp: Date.now()
+            }));
+        }
+    }
+
+    updateUndoButton() {
+        this.undoCanvasBtn.disabled = this.canvasStates.length === 0;
+    }
+
+    toggleFillTool() {
+        this.fillMode = !this.fillMode;
+        
+        // Update button appearance
+        if (this.fillMode) {
+            this.fillToolBtn.classList.add('bg-green-700', 'ring-2', 'ring-green-300');
+            this.fillToolBtn.classList.remove('bg-green-500');
+            this.canvas.style.cursor = 'url(data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjAiIGhlaWdodD0iMjAiIHZpZXdCb3g9IjAgMCAyMCAyMCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTEwIDJMMTggMTBIMTRMMTAgNlY2TDYgMTBIMkwxMCAyWiIgZmlsbD0iYmxhY2siLz4KPHBhdGggZD0iTTIgMTRIMThWMThIMlYxNFoiIGZpbGw9ImJsYWNrIi8+Cjwvc3ZnPgo=) 10 18, auto';
+        } else {
+            this.fillToolBtn.classList.remove('bg-green-700', 'ring-2', 'ring-green-300');
+            this.fillToolBtn.classList.add('bg-green-500');
+            this.canvas.style.cursor = this.isDrawer ? 'crosshair' : 'not-allowed';
+        }
+    }
+
+    floodFill(startX, startY) {
+        const imageData = this.ctx.getImageData(0, 0, this.canvas.width, this.canvas.height);
+        const data = imageData.data;
+        
+        // Convert fill color to RGBA
+        const fillColor = this.hexToRgba(this.colorPicker.value);
+        
+        // Get the color at the starting point
+        const startIndex = (startY * this.canvas.width + startX) * 4;
+        const startColor = {
+            r: data[startIndex],
+            g: data[startIndex + 1],
+            b: data[startIndex + 2],
+            a: data[startIndex + 3]
+        };
+        
+        // If the starting color is the same as fill color, do nothing
+        if (this.colorsMatch(startColor, fillColor)) return;
+        
+        // Perform flood fill using stack-based algorithm
+        const stack = [{x: startX, y: startY}];
+        const visited = new Set();
+        
+        while (stack.length > 0) {
+            const {x, y} = stack.pop();
+            const key = `${x},${y}`;
+            
+            if (visited.has(key) || x < 0 || x >= this.canvas.width || y < 0 || y >= this.canvas.height) {
+                continue;
+            }
+            
+            const index = (y * this.canvas.width + x) * 4;
+            const currentColor = {
+                r: data[index],
+                g: data[index + 1],
+                b: data[index + 2],
+                a: data[index + 3]
+            };
+            
+            if (!this.colorsMatch(currentColor, startColor)) {
+                continue;
+            }
+            
+            visited.add(key);
+            
+            // Set the new color
+            data[index] = fillColor.r;
+            data[index + 1] = fillColor.g;
+            data[index + 2] = fillColor.b;
+            data[index + 3] = 255; // Full alpha
+            
+            // Add neighboring pixels
+            stack.push({x: x + 1, y});
+            stack.push({x: x - 1, y});
+            stack.push({x, y: y + 1});
+            stack.push({x, y: y - 1});
+        }
+        
+        // Apply the changes
+        this.ctx.putImageData(imageData, 0, 0);
+        
+        // Send fill data to other players
+        if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+            this.socket.send(JSON.stringify({
+                type: 'draw',
+                data: { 
+                    fill: true, 
+                    x: startX, 
+                    y: startY, 
+                    color: this.colorPicker.value 
+                },
+                timestamp: Date.now()
+            }));
+        }
+    }
+
+    hexToRgba(hex) {
+        const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+        return result ? {
+            r: parseInt(result[1], 16),
+            g: parseInt(result[2], 16),
+            b: parseInt(result[3], 16),
+            a: 255
+        } : {r: 0, g: 0, b: 0, a: 255};
+    }
+
+    colorsMatch(color1, color2) {
+        return color1.r === color2.r && color1.g === color2.g && 
+               color1.b === color2.b && color1.a === color2.a;
+    }
+
+    performFillForOtherPlayer(x, y, color) {
+        // Similar to floodFill but using received color and coordinates
+        const imageData = this.ctx.getImageData(0, 0, this.canvas.width, this.canvas.height);
+        const data = imageData.data;
+        
+        const fillColor = this.hexToRgba(color);
+        const startIndex = (y * this.canvas.width + x) * 4;
+        const startColor = {
+            r: data[startIndex],
+            g: data[startIndex + 1],
+            b: data[startIndex + 2],
+            a: data[startIndex + 3]
+        };
+        
+        if (this.colorsMatch(startColor, fillColor)) return;
+        
+        const stack = [{x, y}];
+        const visited = new Set();
+        
+        while (stack.length > 0) {
+            const {x: currX, y: currY} = stack.pop();
+            const key = `${currX},${currY}`;
+            
+            if (visited.has(key) || currX < 0 || currX >= this.canvas.width || currY < 0 || currY >= this.canvas.height) {
+                continue;
+            }
+            
+            const index = (currY * this.canvas.width + currX) * 4;
+            const currentColor = {
+                r: data[index],
+                g: data[index + 1],
+                b: data[index + 2],
+                a: data[index + 3]
+            };
+            
+            if (!this.colorsMatch(currentColor, startColor)) {
+                continue;
+            }
+            
+            visited.add(key);
+            
+            data[index] = fillColor.r;
+            data[index + 1] = fillColor.g;
+            data[index + 2] = fillColor.b;
+            data[index + 3] = 255;
+            
+            stack.push({x: currX + 1, y: currY});
+            stack.push({x: currX - 1, y: currY});
+            stack.push({x: currX, y: currY + 1});
+            stack.push({x: currX, y: currY - 1});
+        }
+        
+        this.ctx.putImageData(imageData, 0, 0);
+    }
+
+    openWordListModal() {
+        this.wordListModal.classList.remove('hidden');
+        // Load current custom words if any
+        if (this.customWords) {
+            this.customWordsTextarea.value = this.customWords.join('\n');
+        }
+    }
+
+    closeWordListModal() {
+        this.wordListModal.classList.add('hidden');
+    }
+
+    saveCustomWords() {
+        const wordsText = this.customWordsTextarea.value.trim();
+        if (wordsText) {
+            // Split by commas or newlines and clean up
+            this.customWords = wordsText
+                .split(/[,\n]/)
+                .map(word => word.trim())
+                .filter(word => word.length > 0 && word.length <= 20);
+            
+            if (this.customWords.length < 10) {
+                alert('Please provide at least 10 words for a good game experience.');
+                return;
+            }
+        } else {
+            this.customWords = null; // Use default words
+        }
+        
+        this.closeWordListModal();
+        
+        // Show confirmation
+        const wordCount = this.customWords ? this.customWords.length : 'default';
+        const message = this.customWords 
+            ? `✅ Custom word list saved (${wordCount} words)` 
+            : '✅ Using default word list';
+        
+        // Temporarily show in game status
+        const originalStatus = this.gameStatus.textContent;
+        this.gameStatus.textContent = message;
+        setTimeout(() => {
+            this.gameStatus.textContent = originalStatus;
+        }, 3000);
+    }
+
+    togglePauseGame() {
+        // Simple pause implementation - just disable/enable drawing and chat
+        const isPaused = this.pauseGameBtn.textContent.includes('⏸️');
+        
+        if (isPaused) {
+            // Unpause
+            this.pauseGameBtn.innerHTML = '⏸️ Pause';
+            this.pauseGameBtn.classList.remove('bg-green-500', 'hover:bg-green-600');
+            this.pauseGameBtn.classList.add('bg-orange-500', 'hover:bg-orange-600');
+            this.gameStatus.textContent = '▶️ Game resumed!';
+            
+            // Re-enable interactions
+            if (this.isDrawer) {
+                this.canvas.classList.remove('disabled-canvas');
+                this.drawingTools.classList.remove('hidden');
+            } else if (!this.chatInput.disabled) {
+                this.chatInput.disabled = false;
+            }
+        } else {
+            // Pause
+            this.pauseGameBtn.innerHTML = '▶️ Resume';
+            this.pauseGameBtn.classList.remove('bg-orange-500', 'hover:bg-orange-600');
+            this.pauseGameBtn.classList.add('bg-green-500', 'hover:bg-green-600');
+            this.gameStatus.textContent = '⏸️ Game paused by room creator';
+            
+            // Disable interactions
+            this.canvas.classList.add('disabled-canvas');
+            this.drawingTools.classList.add('hidden');
+            this.chatInput.disabled = true;
+        }
+        
+        // Show temporary status message
+        setTimeout(() => {
+            if (this.isDrawer) {
+                this.gameStatus.textContent = isPaused ? '🎨 You are drawing!' : '⏸️ Game paused by room creator';
+            } else {
+                this.gameStatus.textContent = isPaused ? '🤔 Guess the drawing!' : '⏸️ Game paused by room creator';
+            }
+        }, 2000);
     }
 
     async leaveRoom() {
@@ -510,6 +1128,26 @@ class GameClient {
         this.showHomeScreen();
     }
 
+    handleGameEnd(data) {
+        this.gameStatus.textContent = `🎉 Game Over! Winner: ${data.winner.username}`;
+        
+        // Add game end message to chat
+        this.addChatMessage({
+            username: 'System',
+            message: `🎉 Game finished! 🥇 Winner: ${data.winner.username}`,
+            timestamp: Date.now()
+        });
+
+        // Show final scores
+        const scoresMessage = data.finalScores.map((player, index) => 
+            `${index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : '👤'} ${player.username}: ${player.score}`
+        ).join('\n');
+        
+        setTimeout(() => {
+            alert(`🎉 Game Over!\n\n${scoresMessage}`);
+        }, 1000);
+    }
+
     showGameScreen() {
         this.homeScreen.classList.add('hidden');
         this.gameScreen.classList.remove('hidden');
@@ -522,6 +1160,42 @@ class GameClient {
         this.playerId = null;
         this.roomId = null;
         this.isDrawer = false;
+    }
+
+    async startGame() {
+        if (!this.isCreator || !this.playerId || !this.roomId) {
+            return;
+        }
+
+        try {
+            const gameSettings = {
+                playerId: this.playerId,
+                maxRounds: parseInt(this.roundsSetting.value),
+                customWords: this.customWords || null
+            };
+
+            const response = await fetch(`/rooms/${this.roomId}/start`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(gameSettings)
+            });
+
+            const data = await response.json();
+            if (response.ok) {
+                this.startGameBtn.classList.add('hidden');
+                this.gameSettings.classList.add('hidden');
+                // Show pause button for room creator
+                if (this.isCreator) {
+                    this.pauseGameBtn.classList.remove('hidden');
+                }
+                this.gameStatus.textContent = '🚀 Game starting...';
+            } else {
+                alert(data.error || 'Failed to start game');
+            }
+        } catch (error) {
+            console.error('Error starting game:', error);
+            alert('Failed to start game');
+        }
     }
 }
 

@@ -3,6 +3,7 @@ import {
   handleJoinRoom, 
   handleLeaveRoom, 
   handleGetRoomState, 
+  handleStartGame,
   handleWebSocket 
 } from './handlers/rooms';
 
@@ -42,6 +43,8 @@ export default {
         response = await handleLeaveRoom(request, env);
       } else if (url.pathname.match(/^\/rooms\/[^\/]+$/) && request.method === 'GET') {
         response = await handleGetRoomState(request, env);
+      } else if (url.pathname.match(/^\/rooms\/[^\/]+\/start$/) && request.method === 'POST') {
+        response = await handleStartGame(request, env);
       } else if (url.pathname.match(/^\/rooms\/[^\/]+\/ws$/) && request.headers.get('Upgrade') === 'websocket') {
         // WebSocket connections don't need CORS headers and they can't be modified
         return await handleWebSocket(request, env);
@@ -53,9 +56,15 @@ export default {
       }
 
       // Add CORS headers to the response (skip for WebSocket responses)
-      Object.entries(corsHeaders).forEach(([key, value]) => {
-        response.headers.set(key, value);
-      });
+      if (response.headers) {
+        try {
+          Object.entries(corsHeaders).forEach(([key, value]) => {
+            response.headers.set(key, value);
+          });
+        } catch (error) {
+          console.warn('Could not set CORS headers:', error);
+        }
+      }
 
       return response;
 

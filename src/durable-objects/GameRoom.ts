@@ -11,6 +11,11 @@ export class GameRoomObject extends DurableObject {
   private maxPlayers: number = 8;
   private roundTimer: number | null = null;
   private chatMessages: ChatMessage[] = [];
+  private lastDrawerIndex: number = -1;
+  private maxRounds: number = 10; // Game ends after 10 rounds
+  private roomCreatorId: string | null = null;
+  private gameStarted: boolean = false;
+  private customWords: string[] | null = null;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -30,6 +35,8 @@ export class GameRoomObject extends DurableObject {
         return this.handleLeave(request);
       case "/state":
         return this.handleGetState();
+      case "/start":
+        return this.handleStartGame(request);
       default:
         return new Response("Not found", { status: 404 });
     }
@@ -89,20 +96,29 @@ export class GameRoomObject extends DurableObject {
       isConnected: true
     };
 
+    // Set room creator
+    if (!this.roomCreatorId) {
+      this.roomCreatorId = playerId;
+    }
+
     this.players.set(playerId, player);
     
     this.broadcast({
       type: 'join',
-      data: { player },
+      data: { 
+        player,
+        isCreator: playerId === this.roomCreatorId,
+        gameStarted: this.gameStarted
+      },
       timestamp: Date.now()
     }, playerId);
 
-    // Start the game if we have at least 2 players and no round is active
-    if (this.players.size >= 2 && !this.currentRound) {
-      setTimeout(() => this.startNewRound(), 1000);
-    }
-
-    return Response.json({ playerId, player });
+    return Response.json({ 
+      playerId, 
+      player, 
+      isCreator: playerId === this.roomCreatorId,
+      gameStarted: this.gameStarted 
+    });
   }
 
   private async handleLeave(request: Request): Promise<Response> {
@@ -133,6 +149,36 @@ export class GameRoomObject extends DurableObject {
     return Response.json(this.getGameState());
   }
 
+  private async handleStartGame(request: Request): Promise<Response> {
+    const { playerId, maxRounds, customWords } = await request.json();
+    
+    if (playerId !== this.roomCreatorId) {
+      return Response.json({ error: "Only room creator can start the game" }, { status: 403 });
+    }
+
+    if (this.players.size < 2) {
+      return Response.json({ error: "Need at least 2 players to start" }, { status: 400 });
+    }
+
+    if (this.gameStarted) {
+      return Response.json({ error: "Game already started" }, { status: 400 });
+    }
+
+    // Apply custom game settings
+    if (maxRounds && maxRounds >= 5 && maxRounds <= 20) {
+      this.maxRounds = maxRounds;
+    }
+    
+    if (customWords && Array.isArray(customWords) && customWords.length >= 10) {
+      this.customWords = customWords.map(word => String(word).trim()).filter(word => word.length > 0);
+    }
+
+    this.gameStarted = true;
+    this.startNewRound();
+
+    return Response.json({ success: true });
+  }
+
   private handleWebSocketMessage(playerId: string, message: string) {
     try {
       const msg: WebSocketMessage = JSON.parse(message);
@@ -143,6 +189,9 @@ export class GameRoomObject extends DurableObject {
           break;
         case 'guess':
           this.handleGuess(playerId, msg.data);
+          break;
+        case 'word-choice':
+          this.handleWordChoice(playerId, msg.data);
           break;
         default:
           console.warn('Unknown message type:', msg.type);
@@ -167,6 +216,11 @@ export class GameRoomObject extends DurableObject {
   private handleGuess(playerId: string, guess: string) {
     if (!this.currentRound || this.currentRound.drawerId === playerId) {
       return; // Drawer can't guess
+    }
+
+    // Check if player has already guessed correctly in this round
+    if (this.currentRound.guessedPlayers.has(playerId)) {
+      return; // Player already guessed correctly, ignore further guesses
     }
 
     const player = this.players.get(playerId);
@@ -195,6 +249,20 @@ export class GameRoomObject extends DurableObject {
         drawer.score += 50;
       }
 
+      // Broadcast score update immediately
+      this.broadcast({
+        type: 'score-update',
+        data: {
+          playerId: playerId,
+          newScore: player.score,
+          pointsEarned: 100 + timeBonus,
+          drawerId: this.currentRound.drawerId,
+          drawerScore: drawer?.score,
+          drawerPointsEarned: 50
+        },
+        timestamp: Date.now()
+      });
+
       // Check if all players guessed
       if (this.currentRound.guessedPlayers.size === this.players.size - 1) {
         this.endRound();
@@ -203,46 +271,103 @@ export class GameRoomObject extends DurableObject {
     }
 
     this.chatMessages.push(chatMessage);
-    this.broadcast({
-      type: 'guess',
-      data: chatMessage,
-      timestamp: Date.now()
-    });
+    
+    // Send chat message to players, but hide the word from those who haven't guessed
+    for (const [receiverId, ws] of this.webSockets) {
+      if (ws.readyState === WebSocket.READY_STATE_OPEN) {
+        const shouldRevealWord = chatMessage.isCorrect === false || // Wrong guess, show as-is
+          receiverId === this.currentRound.drawerId || // Drawer sees everything
+          this.currentRound.guessedPlayers.has(receiverId) || // Already guessed correctly
+          receiverId === playerId; // The person who guessed
+          
+        const messageToSend = {
+          ...chatMessage,
+          message: shouldRevealWord ? chatMessage.message : '*** guessed correctly! ***'
+        };
+        
+        const message = {
+          type: 'guess',
+          data: messageToSend,
+          timestamp: Date.now()
+        };
+        
+        ws.send(JSON.stringify(message));
+      }
+    }
   }
 
   private startNewRound() {
-    const playerIds = [...this.players.keys()];
+    const playerIds = [...this.players.keys()].filter(id => this.players.get(id)?.isConnected);
     if (playerIds.length < 2) return;
 
-    const drawerId = playerIds[Math.floor(Math.random() * playerIds.length)];
-    const word = getRandomWord();
+    // Rotate to next player as drawer
+    this.lastDrawerIndex = (this.lastDrawerIndex + 1) % playerIds.length;
+    const drawerId = playerIds[this.lastDrawerIndex];
+    
+    const roundNumber = (this.currentRound?.roundNumber || 0) + 1;
+    
+    // Generate 3 word choices
+    const wordChoices = [this.getRandomWord(), this.getRandomWord(), this.getRandomWord()];
     
     this.currentRound = {
-      roundNumber: (this.currentRound?.roundNumber || 0) + 1,
+      roundNumber,
       drawerId,
-      word,
+      word: '', // Will be set when drawer chooses
       timeLeft: 60000, // 60 seconds
       maxTime: 60000,
       isActive: true,
       guessedPlayers: new Set()
     };
+    
+    console.log(`Starting round ${roundNumber} with drawer ${drawerId}`);
 
-    // Send round start to all players (without word)
-    this.broadcast({
-      type: 'round-start',
+    // Send word choices to drawer
+    this.sendToPlayer(drawerId, {
+      type: 'word-choice',
       data: {
-        drawerId,
-        timeLeft: this.currentRound.timeLeft,
-        roundNumber: this.currentRound.roundNumber
+        wordChoices,
+        timeLeft: 20000 // 20 seconds to choose
       },
       timestamp: Date.now()
     });
 
-    // Send word only to drawer
-    this.sendToPlayer(drawerId, {
+    // Send round preparation to all players
+    this.broadcast({
+      type: 'round-prepare',
+      data: {
+        drawerId,
+        roundNumber: this.currentRound.roundNumber,
+        maxRounds: this.maxRounds
+      },
+      timestamp: Date.now()
+    });
+  }
+
+  private handleWordChoice(playerId: string, chosenWord: string) {
+    if (!this.currentRound || this.currentRound.drawerId !== playerId || this.currentRound.word) {
+      return; // Invalid word choice
+    }
+
+    this.currentRound.word = chosenWord;
+
+    // Now start the actual drawing round
+    this.broadcast({
+      type: 'round-start',
+      data: {
+        drawerId: playerId,
+        timeLeft: this.currentRound.timeLeft,
+        roundNumber: this.currentRound.roundNumber,
+        maxRounds: this.maxRounds,
+        wordHint: chosenWord.replace(/[a-zA-Z]/g, '_') // Show word length as underscores
+      },
+      timestamp: Date.now()
+    });
+
+    // Send word to drawer
+    this.sendToPlayer(playerId, {
       type: 'drawer-word',
       data: {
-        word,
+        word: chosenWord,
         timeLeft: this.currentRound.timeLeft
       },
       timestamp: Date.now()
@@ -284,19 +409,46 @@ export class GameRoomObject extends DurableObject {
     }
 
     const roundData = this.currentRound;
+    const shouldEndGame = roundData && roundData.roundNumber >= this.maxRounds;
+    
+    // Send round-end with word only to players who guessed correctly + drawer
+    for (const [playerId, ws] of this.webSockets) {
+      if (ws.readyState === WebSocket.READY_STATE_OPEN) {
+        const shouldRevealWord = !roundData || 
+          playerId === roundData.drawerId || 
+          roundData.guessedPlayers.has(playerId);
+          
+        const message = {
+          type: 'round-end',
+          data: {
+            word: shouldRevealWord ? roundData?.word : '???',
+            scores: Object.fromEntries(this.players),
+            revealed: shouldRevealWord
+          },
+          timestamp: Date.now()
+        };
+        
+        ws.send(JSON.stringify(message));
+      }
+    }
+
     this.currentRound = null;
 
-    this.broadcast({
-      type: 'round-end',
-      data: {
-        word: roundData?.word,
-        scores: Object.fromEntries(this.players)
-      },
-      timestamp: Date.now()
-    });
-
-    // Start new round after 3 seconds
-    setTimeout(() => this.startNewRound(), 3000);
+    // Check if game should end
+    if (shouldEndGame) {
+      // Game finished! Announce winner
+      setTimeout(() => {
+        this.endGame();
+      }, 3000);
+    } else {
+      // Start new round after 3 seconds if we still have enough players
+      setTimeout(() => {
+        const connectedPlayers = [...this.players.values()].filter(p => p.isConnected);
+        if (connectedPlayers.length >= 2) {
+          this.startNewRound();
+        }
+      }, 3000);
+    }
   }
 
   private handlePlayerDisconnect(playerId: string) {
@@ -343,5 +495,40 @@ export class GameRoomObject extends DurableObject {
       isGameActive: this.isGameActive,
       chatMessages: this.chatMessages.slice(-50) // Last 50 messages
     };
+  }
+
+  private getRandomWord(): string {
+    const wordList = this.customWords || [];
+    if (wordList.length === 0) {
+      return getRandomWord(); // Fallback to default words
+    }
+    return wordList[Math.floor(Math.random() * wordList.length)];
+  }
+
+  private endGame() {
+    // Find winner
+    const players = [...this.players.values()].sort((a, b) => b.score - a.score);
+    const winner = players[0];
+    
+    this.isGameActive = false;
+    this.currentRound = null;
+    
+    // Broadcast game end
+    this.broadcast({
+      type: 'game-end',
+      data: {
+        winner: winner,
+        finalScores: players.map(p => ({ username: p.username, score: p.score }))
+      },
+      timestamp: Date.now()
+    });
+    
+    // Reset for potential new game
+    setTimeout(() => {
+      this.players.forEach(player => {
+        player.score = 0;
+      });
+      this.lastDrawerIndex = -1;
+    }, 10000); // Reset after 10 seconds
   }
 }

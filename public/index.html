@@ -4,32 +4,141 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Wutizzit - Drawing Game</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🎨</text></svg>">
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
-        .canvas-container {
-            border: 2px solid #e5e7eb;
-            border-radius: 8px;
+        body {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
         }
+        
+        .game-card {
+            background: linear-gradient(145deg, #ffffff, #f0f0f0);
+            box-shadow: 20px 20px 60px #bebebe, -20px -20px 60px #ffffff;
+            border-radius: 20px;
+        }
+        
+        .canvas-container {
+            border: 3px solid #ff6b6b;
+            border-radius: 15px;
+            background: #fff;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.1);
+        }
+        
         .drawing-canvas {
             cursor: crosshair;
+            border-radius: 12px;
         }
+        
         .disabled-canvas {
             cursor: not-allowed;
             opacity: 0.6;
+        }
+        
+        .fun-button {
+            background: linear-gradient(45deg, #ff6b6b, #ffd93d);
+            border: none;
+            color: white;
+            font-weight: bold;
+            text-shadow: 1px 1px 2px rgba(0,0,0,0.2);
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+        }
+        
+        .fun-button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 25px rgba(0,0,0,0.3);
+        }
+        
+        .fun-input {
+            border: 2px solid #ff6b6b;
+            border-radius: 15px;
+            background: rgba(255,255,255,0.9);
+        }
+        
+        .fun-input:focus {
+            outline: none;
+            border-color: #ffd93d;
+            box-shadow: 0 0 0 3px rgba(255, 217, 61, 0.3);
+        }
+        
+        .chat-bubble {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border-radius: 15px;
+            padding: 8px 12px;
+            margin: 4px 0;
+            animation: slideIn 0.3s ease-out;
+        }
+        
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateX(-20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateX(0);
+            }
+        }
+        
+        .player-card {
+            background: linear-gradient(135deg, #ff9a9e 0%, #fecfef 100%);
+            border-radius: 12px;
+            transition: all 0.3s ease;
+        }
+        
+        .player-card:hover {
+            transform: scale(1.02);
+        }
+        
+        .title-text {
+            background: linear-gradient(45deg, #ff6b6b, #4ecdc4, #45b7d1, #96ceb4, #ffecd2);
+            background-size: 300% 300%;
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            animation: gradientShift 3s ease infinite;
+        }
+        
+        @keyframes gradientShift {
+            0% { background-position: 0% 50%; }
+            50% { background-position: 100% 50%; }
+            100% { background-position: 0% 50%; }
         }
     </style>
 </head>
 <body class="bg-gray-100 min-h-screen">
     <div id="app" class="container mx-auto px-4 py-8">
         <!-- Home Screen -->
-        <div id="home-screen" class="max-w-md mx-auto bg-white rounded-lg shadow-lg p-8">
-            <h1 class="text-4xl font-bold text-center mb-8 text-blue-600">Wutizzit</h1>
+        <div id="home-screen" class="max-w-md mx-auto game-card p-8">
+            <h1 class="text-4xl font-bold text-center mb-8 title-text">Wutizzit</h1>
+            
+            <!-- Game Stats -->
+            <div class="text-center mb-6 p-4 bg-purple-50 rounded-lg">
+                <div class="grid grid-cols-2 gap-4 text-sm">
+                    <div>
+                        <div class="font-bold text-purple-600" id="active-games">0</div>
+                        <div class="text-purple-500">Active Games</div>
+                    </div>
+                    <div>
+                        <div class="font-bold text-purple-600" id="total-players">0</div>
+                        <div class="text-purple-500">Online Players</div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Active Games List -->
+            <div id="active-games-list" class="mb-6 hidden">
+                <h3 class="font-bold text-sm mb-3 text-gray-700">🎮 Join Active Games:</h3>
+                <div id="games-container" class="space-y-2"></div>
+            </div>
+            
             <div class="space-y-4">
                 <input 
                     type="text" 
                     id="username-input" 
                     placeholder="Enter your username" 
-                    class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    class="w-full px-4 py-3 fun-input"
                     maxlength="20"
                 />
                 <div class="flex gap-2">
@@ -37,19 +146,19 @@
                         type="text" 
                         id="room-input" 
                         placeholder="Room ID (optional)" 
-                        class="flex-1 px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        class="flex-1 px-4 py-3 fun-input"
                         maxlength="6"
                     />
                     <button 
                         id="join-room-btn" 
-                        class="px-6 py-3 bg-green-600 text-white rounded-lg hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500"
+                        class="px-6 py-3 fun-button rounded-lg"
                     >
                         Join
                     </button>
                 </div>
                 <button 
                     id="create-room-btn" 
-                    class="w-full px-4 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    class="w-full px-4 py-3 fun-button rounded-lg"
                 >
                     Create New Room
                 </button>
@@ -62,15 +171,49 @@
                 <!-- Main Game Area -->
                 <div class="flex-1">
                     <!-- Game Header -->
-                    <div class="bg-white rounded-lg shadow p-4 mb-4">
+                    <div class="game-card p-4 mb-4">
                         <div class="flex justify-between items-center">
                             <div>
                                 <h2 class="text-xl font-bold">Room: <span id="room-id-display"></span></h2>
                                 <p id="game-status" class="text-gray-600">Waiting for players...</p>
+                                <!-- Game Settings (only visible to room creator) -->
+                                <div id="game-settings" class="mt-2 hidden">
+                                    <div class="flex gap-4 items-center mb-2">
+                                        <div class="flex items-center gap-2">
+                                            <label for="rounds-setting" class="text-sm font-medium">Rounds:</label>
+                                            <select id="rounds-setting" class="px-2 py-1 border rounded">
+                                                <option value="5">5</option>
+                                                <option value="10" selected>10</option>
+                                                <option value="15">15</option>
+                                                <option value="20">20</option>
+                                            </select>
+                                        </div>
+                                        <button 
+                                            id="word-list-btn" 
+                                            class="px-3 py-1 bg-purple-500 text-white rounded hover:bg-purple-600 text-sm"
+                                        >
+                                            📝 Edit Words
+                                        </button>
+                                    </div>
+                                </div>
+                                <div class="flex gap-2 mt-2">
+                                    <button 
+                                        id="start-game-btn" 
+                                        class="px-4 py-2 fun-button rounded-lg hidden"
+                                    >
+                                        Start Game
+                                    </button>
+                                    <button 
+                                        id="pause-game-btn" 
+                                        class="px-4 py-2 bg-orange-500 text-white rounded hover:bg-orange-600 hidden"
+                                    >
+                                        ⏸️ Pause
+                                    </button>
+                                </div>
                             </div>
                             <div class="text-right">
                                 <div id="timer" class="text-2xl font-bold text-red-600">0:00</div>
-                                <div id="round-info" class="text-sm text-gray-600">Round 0</div>
+                                <div id="round-info" class="text-sm text-gray-600">Round 0 of 10</div>
                             </div>
                         </div>
                     </div>
@@ -79,6 +222,20 @@
                     <div class="bg-white rounded-lg shadow p-4 mb-4">
                         <div id="word-display" class="text-center mb-4 hidden">
                             <p class="text-lg font-semibold">Your word: <span id="current-word" class="text-blue-600"></span></p>
+                        </div>
+                        
+                        <div id="word-hint" class="text-center mb-4 hidden">
+                            <p class="text-lg font-semibold">Word: <span id="hint-text" class="text-gray-600 font-mono tracking-widest"></span></p>
+                        </div>
+                        
+                        <div id="word-choice" class="text-center mb-4 hidden">
+                            <p class="text-lg font-semibold mb-3">Choose your word:</p>
+                            <div class="flex gap-2 justify-center">
+                                <button id="word-choice-1" class="px-4 py-2 fun-button rounded-lg"></button>
+                                <button id="word-choice-2" class="px-4 py-2 fun-button rounded-lg"></button>
+                                <button id="word-choice-3" class="px-4 py-2 fun-button rounded-lg"></button>
+                            </div>
+                            <p id="choice-timer" class="text-sm text-gray-600 mt-2">20 seconds to choose</p>
                         </div>
                         
                         <!-- Drawing Tools -->
@@ -91,6 +248,12 @@
                                 <label class="text-sm">Size:</label>
                                 <input type="range" id="brush-size" min="1" max="20" value="3" class="w-24">
                             </div>
+                            <button id="fill-tool" class="px-3 py-1 bg-green-500 text-white rounded hover:bg-green-600">
+                                🪣 Fill
+                            </button>
+                            <button id="undo-canvas" class="px-3 py-1 bg-yellow-500 text-white rounded hover:bg-yellow-600" disabled>
+                                ↶ Undo
+                            </button>
                             <button id="clear-canvas" class="px-3 py-1 bg-red-500 text-white rounded hover:bg-red-600">
                                 Clear
                             </button>
@@ -144,6 +307,29 @@
                     class="px-6 py-2 bg-red-600 text-white rounded hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500"
                 >
                     Leave Room
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Word List Edit Modal -->
+    <div id="word-list-modal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center hidden z-50">
+        <div class="bg-white rounded-lg p-6 max-w-md w-full mx-4">
+            <h3 class="text-xl font-bold mb-4">📝 Edit Word List</h3>
+            <p class="text-sm text-gray-600 mb-3">Enter words separated by commas or new lines:</p>
+            <textarea 
+                id="custom-words" 
+                rows="8" 
+                class="w-full p-3 border border-gray-300 rounded-lg resize-none"
+                placeholder="cat, dog, house, tree, happy, computer, rainbow..."
+            ></textarea>
+            <p class="text-xs text-gray-500 mt-2">Leave empty to use default word list</p>
+            <div class="flex gap-2 mt-4">
+                <button id="save-words-btn" class="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600">
+                    Save
+                </button>
+                <button id="cancel-words-btn" class="px-4 py-2 bg-gray-500 text-white rounded hover:bg-gray-600">
+                    Cancel
                 </button>
             </div>
         </div>

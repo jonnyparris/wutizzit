@@ -39,7 +39,7 @@ This is a Cloudflare Worker project that should handle everything.
 
 ## Development:
 - Local dev: npm run dev
-- Build: npm run build  
+- Build: npm run build
 - Deploy: npm run deploy
 
 ## Testing:
@@ -67,3 +67,8 @@ This is a Cloudflare Worker project that should handle everything.
 - Use Durable Objects for stateful operations
 - Leverage KV for caching when appropriate
 - Keep memory usage minimal
+
+## Transparent working:
+- update any todo items as you complete them
+- add and update any helpful rules or hints to a rules.md in this folder as you learn more about this project and my preferences
+- make descriptive git commits as you complete bitesize chunks of new functionality

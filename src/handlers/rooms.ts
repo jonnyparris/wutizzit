@@ -107,6 +107,39 @@ export async function handleGetRoomState(request: Request, env: Env): Promise<Re
   return response;
 }
 
+export async function handleStartGame(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+  const roomId = url.pathname.split('/')[2]; // /rooms/{roomId}/start
+  
+  if (!roomId) {
+    return Response.json({ error: "Room ID is required" }, { status: 400 });
+  }
+
+  try {
+    const { playerId } = await request.json();
+    
+    if (!playerId) {
+      return Response.json({ error: "Player ID is required" }, { status: 400 });
+    }
+
+    // Get the Durable Object stub for this room
+    const durableObjectId = env.GAME_ROOM.idFromName(roomId);
+    const stub = env.GAME_ROOM.get(durableObjectId);
+    
+    // Forward the start request to the Durable Object
+    const response = await stub.fetch('http://localhost/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ playerId })
+    });
+
+    return response;
+    
+  } catch (error) {
+    return Response.json({ error: "Invalid request body" }, { status: 400 });
+  }
+}
+
 export async function handleWebSocket(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const roomId = url.pathname.split('/')[2]; // /rooms/{roomId}/ws
