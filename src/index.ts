@@ -4,7 +4,8 @@ import {
   handleLeaveRoom, 
   handleGetRoomState, 
   handleStartGame,
-  handleWebSocket 
+  handleWebSocket,
+  handleGetStats
 } from './handlers/rooms';
 
 export { GameRoomObject } from './durable-objects/GameRoom';
@@ -48,6 +49,8 @@ export default {
       } else if (url.pathname.match(/^\/rooms\/[^\/]+\/ws$/) && request.headers.get('Upgrade') === 'websocket') {
         // WebSocket connections don't need CORS headers and they can't be modified
         return await handleWebSocket(request, env);
+      } else if (url.pathname === '/api/stats' && request.method === 'GET') {
+        response = await handleGetStats(env);
       } else if (url.pathname === '/' || url.pathname.startsWith('/assets/') || url.pathname.endsWith('.css') || url.pathname.endsWith('.js') || url.pathname.endsWith('.html')) {
         // Serve static assets
         return fetch(request);

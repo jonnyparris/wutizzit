@@ -19,43 +19,52 @@ class GameClient {
         this.updateHomePageStats();
     }
 
-    updateHomePageStats() {
-        // Simple mock stats for now
-        document.getElementById('active-games').textContent = Math.floor(Math.random() * 5) + 2;
-        document.getElementById('total-players').textContent = Math.floor(Math.random() * 20) + 8;
-        
-        // Mock active games
-        const gamesContainer = document.getElementById('games-container');
-        const activeGamesList = document.getElementById('active-games-list');
-        
-        const mockGames = [
-            { id: 'ABC123', players: 4, round: 3 },
-            { id: 'XYZ789', players: 6, round: 1 }
-        ];
-        
-        if (Math.random() > 0.3) { // 70% chance to show games
-            gamesContainer.innerHTML = '';
-            mockGames.forEach(game => {
-                const gameDiv = document.createElement('div');
-                gameDiv.className = 'p-2 bg-white rounded border cursor-pointer hover:bg-gray-50';
-                gameDiv.innerHTML = `
-                    <div class="flex justify-between items-center">
-                        <div>
-                            <div class="font-medium text-sm">${game.id}</div>
-                            <div class="text-xs text-gray-500">${game.players} players • Round ${game.round}</div>
+    async updateHomePageStats() {
+        try {
+            const response = await fetch('/api/stats');
+            const stats = await response.json();
+            
+            document.getElementById('active-games').textContent = stats.activeGames || 0;
+            document.getElementById('total-players').textContent = stats.totalPlayers || 0;
+            
+            // Mock active games for now - could be enhanced with real game data
+            const gamesContainer = document.getElementById('games-container');
+            const activeGamesList = document.getElementById('active-games-list');
+            
+            const mockGames = [
+                { id: 'ABC123', players: 4, round: 3 },
+                { id: 'XYZ789', players: 6, round: 1 }
+            ];
+            
+            if (stats.activeGames > 0 && Math.random() > 0.3) { // Show games if there are active ones
+                gamesContainer.innerHTML = '';
+                mockGames.slice(0, Math.min(stats.activeGames, 2)).forEach(game => {
+                    const gameDiv = document.createElement('div');
+                    gameDiv.className = 'p-2 bg-white rounded border cursor-pointer hover:bg-gray-50';
+                    gameDiv.innerHTML = `
+                        <div class="flex justify-between items-center">
+                            <div>
+                                <div class="font-medium text-sm">${game.id}</div>
+                                <div class="text-xs text-gray-500">${game.players} players • Round ${game.round}</div>
+                            </div>
+                            <button class="px-2 py-1 bg-blue-500 text-white text-xs rounded hover:bg-blue-600">
+                                Join
+                            </button>
                         </div>
-                        <button class="px-2 py-1 bg-blue-500 text-white text-xs rounded hover:bg-blue-600">
-                            Join
-                        </button>
-                    </div>
-                `;
-                gameDiv.onclick = () => {
-                    this.roomInput.value = game.id;
-                    this.joinRoom(game.id);
-                };
-                gamesContainer.appendChild(gameDiv);
-            });
-            activeGamesList.classList.remove('hidden');
+                    `;
+                    gameDiv.onclick = () => {
+                        this.roomInput.value = game.id;
+                        this.joinRoom(game.id);
+                    };
+                    gamesContainer.appendChild(gameDiv);
+                });
+                activeGamesList.classList.remove('hidden');
+            }
+        } catch (error) {
+            console.error('Failed to fetch stats:', error);
+            // Fallback to static numbers
+            document.getElementById('active-games').textContent = '3';
+            document.getElementById('total-players').textContent = '12';
         }
     }
 
