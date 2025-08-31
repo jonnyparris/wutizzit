@@ -6,7 +6,8 @@ import {
   handleStartGame,
   handleWebSocket,
   handleGetStats,
-  handleGetActiveGames
+  handleGetActiveGames,
+  handleBanPlayer
 } from './handlers/rooms';
 
 export { GameRoomObject } from './durable-objects/GameRoom';
@@ -47,6 +48,8 @@ export default {
         response = await handleGetRoomState(request, env);
       } else if (url.pathname.match(/^\/rooms\/[^\/]+\/start$/) && request.method === 'POST') {
         response = await handleStartGame(request, env);
+      } else if (url.pathname.match(/^\/rooms\/[^\/]+\/ban$/) && request.method === 'POST') {
+        response = await handleBanPlayer(request, env);
       } else if (url.pathname.match(/^\/rooms\/[^\/]+\/ws$/) && request.headers.get('Upgrade') === 'websocket') {
         // WebSocket connections don't need CORS headers and they can't be modified
         return await handleWebSocket(request, env);

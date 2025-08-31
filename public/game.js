@@ -8,6 +8,7 @@ class GameClient {
         this.canvas = null;
         this.ctx = null;
         this.audioContext = null;
+        this.isRoomCreator = false;
         
         this.init();
     }
@@ -76,6 +77,9 @@ class GameClient {
                 break;
             case 'timer-warning':
                 this.playSound(800, 100); // High beep
+                break;
+            case 'timer-tick':
+                this.playSound(600, 80); // Short tick
                 break;
         }
     }
@@ -284,6 +288,9 @@ class GameClient {
         document.addEventListener('click', (e) => {
             if (e.target.classList.contains('color-swatch')) {
                 this.selectColor(e.target.dataset.color);
+            }
+            if (e.target.classList.contains('ban-player-btn')) {
+                this.banPlayer(e.target.dataset.playerId);
             }
         });
     }
@@ -534,6 +541,9 @@ class GameClient {
             case 'game-end':
                 this.handleGameEnd(message.data);
                 break;
+            case 'player-banned':
+                this.handlePlayerBanned(message.data);
+                break;
         }
     }
 
@@ -580,6 +590,10 @@ class GameClient {
                     isCurrentPlayer ? 'ring-2 ring-blue-400 bg-blue-50 border-2 border-blue-300' : ''
                 }`;
                 const avatar = this.generatePlayerAvatar(player.id);
+                
+                // Show ban button for room creator (but not for themselves)
+                const canBan = this.isCreator && !isCurrentPlayer;
+                
                 playerDiv.innerHTML = `
                     <div class="flex items-center gap-2">
                         <span class="text-lg">${avatar}</span>
@@ -587,7 +601,10 @@ class GameClient {
                             ${isCurrentPlayer ? '👤 ' : ''}${isLeader ? '👑 ' : ''}${player.username}${isCurrentPlayer ? ' (You)' : ''}
                         </span>
                     </div>
-                    <span class="text-sm font-bold ${isCurrentPlayer ? 'text-blue-700' : ''}">${player.score}</span>
+                    <div class="flex items-center gap-2">
+                        <span class="text-sm font-bold ${isCurrentPlayer ? 'text-blue-700' : ''}">${player.score}</span>
+                        ${canBan ? `<button class="ban-player-btn text-xs px-2 py-1 bg-red-500 text-white rounded hover:bg-red-600" data-player-id="${player.id}">🚫</button>` : ''}
+                    </div>
                 `;
                 this.playersListContainer.appendChild(playerDiv);
             });
@@ -636,9 +653,28 @@ class GameClient {
             this.updatePlayersList(this.playersData);
         }
         
+        let leaveMessage = `🚪 Player left the room`;
+        
+        // Handle ownership transfer
+        if (data.ownerTransferred && data.newOwnerId) {
+            const newOwnerName = this.playersData?.[data.newOwnerId]?.username || 'Unknown Player';
+            leaveMessage += `\n👑 ${newOwnerName} is now the room owner`;
+            
+            // Update UI if the current player became owner
+            if (data.newOwnerId === this.playerId) {
+                this.startGameBtn.classList.remove('hidden');
+                this.addChatMessage({
+                    username: 'System',
+                    message: '👑 You are now the room owner! You can start the game.',
+                    timestamp: Date.now(),
+                    isGuess: false
+                });
+            }
+        }
+        
         this.addChatMessage({
             username: 'System',
-            message: `🚪 Player left the room`,
+            message: leaveMessage,
             timestamp: Date.now(),
             isGuess: false
         });
@@ -745,9 +781,10 @@ class GameClient {
     handleTimerUpdate(data) {
         this.updateTimer(data.timeLeft);
         
-        // Play warning sound when 10 seconds left
-        if (data.timeLeft === 10000) {
-            this.playSoundEffect('timer-warning');
+        // Play ticking sound for final 10 seconds
+        const secondsLeft = Math.floor(data.timeLeft / 1000);
+        if (secondsLeft <= 10 && secondsLeft > 0) {
+            this.playSoundEffect('timer-tick');
         }
     }
 
@@ -1261,6 +1298,51 @@ class GameClient {
                 this.gameStatus.textContent = isPaused ? '🤔 Guess the drawing!' : '⏸️ Game paused by room creator';
             }
         }, 2000);
+    }
+
+    handlePlayerBanned(data) {
+        // Remove banned player from stored data
+        if (this.playersData && data.bannedPlayerId) {
+            delete this.playersData[data.bannedPlayerId];
+            this.updatePlayersList(this.playersData);
+        }
+        
+        this.addChatMessage({
+            username: 'System',
+            message: `🚫 ${data.bannedPlayerName} has been banned from the room`,
+            timestamp: Date.now(),
+            isGuess: false
+        });
+    }
+
+    async banPlayer(targetPlayerId) {
+        if (!this.isCreator) return;
+        
+        const targetPlayer = this.playersData?.[targetPlayerId];
+        if (!targetPlayer) return;
+        
+        if (!confirm(`Are you sure you want to ban ${targetPlayer.username}?`)) {
+            return;
+        }
+        
+        try {
+            const response = await fetch(`/rooms/${this.roomId}/ban`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ 
+                    requesterId: this.playerId,
+                    targetPlayerId: targetPlayerId
+                })
+            });
+            
+            if (!response.ok) {
+                const error = await response.json();
+                alert(`Failed to ban player: ${error.error}`);
+            }
+        } catch (error) {
+            console.error('Error banning player:', error);
+            alert('Failed to ban player');
+        }
     }
 
     async leaveRoom() {

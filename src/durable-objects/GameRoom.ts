@@ -8,7 +8,7 @@ export class GameRoomObject extends DurableObject {
   private webSockets: Map<string, WebSocket> = new Map();
   private currentRound: GameRound | null = null;
   private isGameActive: boolean = false;
-  private maxPlayers: number = 8;
+  private maxPlayers: number = 10;
   private roundTimer: number | null = null;
   private chatMessages: ChatMessage[] = [];
   private lastDrawerIndex: number = -1;
@@ -17,6 +17,7 @@ export class GameRoomObject extends DurableObject {
   private gameStarted: boolean = false;
   private customWords: string[] | null = null;
   private currentRoundNumber: number = 0;
+  private bannedPlayers: Set<string> = new Set(); // Store banned player IDs
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -38,6 +39,8 @@ export class GameRoomObject extends DurableObject {
         return this.handleGetState();
       case "/start":
         return this.handleStartGame(request);
+      case "/ban":
+        return this.handleBanPlayer(request);
       default:
         return new Response("Not found", { status: 404 });
     }
@@ -89,9 +92,9 @@ export class GameRoomObject extends DurableObject {
       return Response.json({ error: "Username already taken" }, { status: 400 });
     }
 
-    const playerId = generateId();
+    const newPlayerId = generateId();
     const player: Player = {
-      id: playerId,
+      id: newPlayerId,
       username,
       score: 0,
       isConnected: true
@@ -99,25 +102,25 @@ export class GameRoomObject extends DurableObject {
 
     // Set room creator
     if (!this.roomCreatorId) {
-      this.roomCreatorId = playerId;
+      this.roomCreatorId = newPlayerId;
     }
 
-    this.players.set(playerId, player);
+    this.players.set(newPlayerId, player);
     
     this.broadcast({
       type: 'join',
       data: { 
         player,
-        isCreator: playerId === this.roomCreatorId,
+        isCreator: newPlayerId === this.roomCreatorId,
         gameStarted: this.gameStarted
       },
       timestamp: Date.now()
-    }, playerId);
+    }, newPlayerId);
 
     return Response.json({ 
-      playerId, 
+      playerId: newPlayerId, 
       player, 
-      isCreator: playerId === this.roomCreatorId,
+      isCreator: newPlayerId === this.roomCreatorId,
       gameStarted: this.gameStarted 
     });
   }
@@ -129,12 +132,29 @@ export class GameRoomObject extends DurableObject {
       return Response.json({ error: "Player not found" }, { status: 404 });
     }
 
+    // Check if owner is leaving and transfer ownership
+    let newOwnerId = null;
+    if (playerId === this.roomCreatorId && this.players.size > 1) {
+      // Find the next player to become owner (first connected player that isn't leaving)
+      for (const [id, player] of this.players) {
+        if (id !== playerId && player.isConnected) {
+          this.roomCreatorId = id;
+          newOwnerId = id;
+          break;
+        }
+      }
+    }
+
     this.players.delete(playerId);
     this.webSockets.delete(playerId);
 
     this.broadcast({
       type: 'leave',
-      data: { playerId },
+      data: { 
+        playerId,
+        newOwnerId,
+        ownerTransferred: newOwnerId !== null
+      },
       timestamp: Date.now()
     });
 
@@ -146,6 +166,51 @@ export class GameRoomObject extends DurableObject {
     // Check if all players have left and end game if needed
     this.checkAndHandleEmptyRoom();
 
+    return Response.json({ success: true });
+  }
+
+  private async handleBanPlayer(request: Request): Promise<Response> {
+    const { requesterId, targetPlayerId } = await request.json();
+    
+    // Only room creator can ban players
+    if (requesterId !== this.roomCreatorId) {
+      return Response.json({ error: "Only room creator can ban players" }, { status: 403 });
+    }
+    
+    // Can't ban yourself
+    if (requesterId === targetPlayerId) {
+      return Response.json({ error: "Cannot ban yourself" }, { status: 400 });
+    }
+    
+    // Check if target player exists
+    if (!this.players.has(targetPlayerId)) {
+      return Response.json({ error: "Player not found" }, { status: 404 });
+    }
+    
+    const targetPlayer = this.players.get(targetPlayerId)!;
+    
+    // Add to ban list
+    this.bannedPlayers.add(targetPlayerId);
+    
+    // Remove player from game
+    this.players.delete(targetPlayerId);
+    this.webSockets.delete(targetPlayerId);
+    
+    // Broadcast ban event
+    this.broadcast({
+      type: 'player-banned',
+      data: { 
+        bannedPlayerId: targetPlayerId,
+        bannedPlayerName: targetPlayer.username
+      },
+      timestamp: Date.now()
+    });
+    
+    // End round if banned player was drawing
+    if (this.currentRound && this.currentRound.drawerId === targetPlayerId) {
+      this.endRound();
+    }
+    
     return Response.json({ success: true });
   }
 
@@ -462,9 +527,26 @@ export class GameRoomObject extends DurableObject {
     if (player) {
       player.isConnected = false;
       
+      // Check if owner disconnected and transfer ownership
+      let newOwnerId = null;
+      if (playerId === this.roomCreatorId) {
+        // Find the next connected player to become owner
+        for (const [id, p] of this.players) {
+          if (id !== playerId && p.isConnected) {
+            this.roomCreatorId = id;
+            newOwnerId = id;
+            break;
+          }
+        }
+      }
+      
       this.broadcast({
         type: 'leave',
-        data: { playerId },
+        data: { 
+          playerId,
+          newOwnerId,
+          ownerTransferred: newOwnerId !== null
+        },
         timestamp: Date.now()
       });
 

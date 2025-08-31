@@ -107,6 +107,39 @@ export async function handleGetRoomState(request: Request, env: Env): Promise<Re
   return response;
 }
 
+export async function handleBanPlayer(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+  const roomId = url.pathname.split('/')[2]; // /rooms/{roomId}/ban
+  
+  if (!roomId) {
+    return Response.json({ error: "Room ID is required" }, { status: 400 });
+  }
+
+  try {
+    const { requesterId, targetPlayerId } = await request.json();
+    
+    if (!requesterId || !targetPlayerId) {
+      return Response.json({ error: "Requester ID and target player ID are required" }, { status: 400 });
+    }
+
+    // Get the Durable Object stub for this room
+    const durableObjectId = env.GAME_ROOM.idFromName(roomId);
+    const stub = env.GAME_ROOM.get(durableObjectId);
+    
+    // Forward the ban request to the Durable Object
+    const response = await stub.fetch('http://localhost/ban', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ requesterId, targetPlayerId })
+    });
+
+    return response;
+    
+  } catch (error) {
+    return Response.json({ error: "Invalid request body" }, { status: 400 });
+  }
+}
+
 export async function handleStartGame(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const roomId = url.pathname.split('/')[2]; // /rooms/{roomId}/start
@@ -164,20 +197,28 @@ export async function handleGetStats(env: Env): Promise<Response> {
   let totalPlayers = 0;
   let gamesCompleted = 0;
   
-  // For a basic implementation, we track a limited set of possible room IDs
-  // In production, you'd want a dedicated tracking system
-  const commonRoomPrefixes = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J'];
+  // Generate a broader range of potential room IDs that match our actual format
+  // Room IDs are 6-character alphanumeric strings (uppercase)
   const roomsToCheck = [];
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
   
-  // Generate potential room IDs to check
-  for (const prefix of commonRoomPrefixes) {
-    for (let i = 0; i < 100; i++) {
-      roomsToCheck.push(`${prefix}${String(i).padStart(2, '0')}`);
+  // Generate common starting patterns for 6-char room IDs
+  for (let i = 0; i < chars.length; i++) {
+    for (let j = 0; j < chars.length; j++) {
+      for (let k = 0; k < Math.min(chars.length, 10); k++) { // Limit third char to avoid too many combinations
+        const prefix = chars[i] + chars[j] + chars[k];
+        // Add some common suffixes
+        roomsToCheck.push(prefix + '000', prefix + '111', prefix + '123', prefix + 'ABC');
+      }
     }
   }
   
-  // Sample a smaller subset to avoid timeout
-  const sampleSize = Math.min(50, roomsToCheck.length);
+  // Also add some completely random patterns that are common
+  const commonPatterns = ['A1B2C3', 'X7Y8Z9', 'ABC123', 'XYZ789', 'Q1W2E3', 'TEST01'];
+  roomsToCheck.push(...commonPatterns);
+  
+  // Sample a reasonable subset to avoid timeout
+  const sampleSize = Math.min(100, roomsToCheck.length);
   const samplesToCheck = roomsToCheck.slice(0, sampleSize);
   
   try {
@@ -228,15 +269,22 @@ export async function handleGetStats(env: Env): Promise<Response> {
 export async function handleGetActiveGames(env: Env): Promise<Response> {
   const activeGames = [];
   
-  // Generate a reasonable set of room IDs to check
-  const commonRoomPrefixes = ['A', 'B', 'C', 'D', 'E', 'F'];
+  // Generate potential room IDs that match our actual 6-char format
   const roomsToCheck = [];
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
   
-  for (const prefix of commonRoomPrefixes) {
-    for (let i = 0; i < 20; i++) {
-      roomsToCheck.push(`${prefix}${String(i).padStart(2, '0')}`);
+  // Generate some common patterns for active games checking
+  for (let i = 0; i < 10; i++) { // First 10 chars
+    for (let j = 0; j < 10; j++) { // First 10 chars  
+      const prefix = chars[i] + chars[j];
+      // Add some likely suffixes
+      roomsToCheck.push(prefix + '0000', prefix + '1111', prefix + 'ABCD', prefix + '1234');
     }
   }
+  
+  // Add some common test patterns
+  const commonPatterns = ['ABCDEF', 'TESTID', 'ROOM01', 'GAME99', 'PLAY11'];
+  roomsToCheck.push(...commonPatterns);
   
   try {
     const promises = roomsToCheck.map(async (roomId) => {
