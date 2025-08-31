@@ -43,7 +43,8 @@ export default {
       } else if (url.pathname.match(/^\/rooms\/[^\/]+$/) && request.method === 'GET') {
         response = await handleGetRoomState(request, env);
       } else if (url.pathname.match(/^\/rooms\/[^\/]+\/ws$/) && request.headers.get('Upgrade') === 'websocket') {
-        response = await handleWebSocket(request, env);
+        // WebSocket connections don't need CORS headers and they can't be modified
+        return await handleWebSocket(request, env);
       } else if (url.pathname === '/' || url.pathname.startsWith('/assets/') || url.pathname.endsWith('.css') || url.pathname.endsWith('.js') || url.pathname.endsWith('.html')) {
         // Serve static assets
         return fetch(request);
@@ -51,7 +52,7 @@ export default {
         response = new Response('Not Found', { status: 404 });
       }
 
-      // Add CORS headers to the response
+      // Add CORS headers to the response (skip for WebSocket responses)
       Object.entries(corsHeaders).forEach(([key, value]) => {
         response.headers.set(key, value);
       });
