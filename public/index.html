@@ -5,7 +5,21 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Wutizzit - Drawing Game</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🎨</text></svg>">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        'sans': ['Inter', 'system-ui', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'Roboto', 'Helvetica Neue', 'Arial', 'sans-serif'],
+                    }
+                }
+            }
+        }
+    </script>
     <style>
         body {
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
@@ -108,6 +122,22 @@
     </style>
 </head>
 <body class="bg-gray-100 min-h-screen">
+    <!-- Header -->
+    <header class="bg-white shadow-sm border-b border-gray-200">
+        <div class="max-w-6xl mx-auto px-4 py-4">
+            <div class="flex justify-between items-center">
+                <div class="flex items-center space-x-2">
+                    <span class="text-2xl">🎨</span>
+                    <h1 class="text-2xl font-bold text-gray-800">Wutizzit</h1>
+                    <span class="text-sm text-gray-500 hidden sm:inline">· The Drawing Game</span>
+                </div>
+                <div class="text-sm text-gray-600 hidden md:block">
+                    Draw, Guess, Win! 🏆
+                </div>
+            </div>
+        </div>
+    </header>
+
     <div id="app" class="container mx-auto px-4 py-8">
         <!-- Home Screen -->
         <div id="home-screen" class="max-w-md mx-auto game-card p-8">
@@ -243,7 +273,7 @@
                         </div>
                         
                         <div id="word-hint" class="text-center mb-4 hidden">
-                            <p class="text-lg font-semibold">Word: <span id="hint-text" class="text-gray-600 font-mono tracking-widest"></span></p>
+                            <p class="text-lg font-semibold">Word: <span id="hint-text" class="text-gray-600 font-mono tracking-widest"></span> <span id="letter-count" class="text-sm text-gray-500 ml-2"></span></p>
                         </div>
                         
                         <div id="word-choice" class="text-center mb-4 hidden">
@@ -301,7 +331,7 @@
                 </div>
 
                 <!-- Sidebar -->
-                <div class="w-full lg:w-80 space-y-4">
+                <div class="w-full lg:w-80 space-y-4 lg:self-start lg:sticky lg:top-4">
                     <!-- Players List -->
                     <div class="bg-white rounded-lg shadow p-4">
                         <h3 class="font-bold text-lg mb-3">Players</h3>
@@ -414,6 +444,45 @@
             </button>
         </div>
     </div>
+
+    <!-- Footer -->
+    <footer class="bg-white border-t border-gray-200 mt-12">
+        <div class="max-w-6xl mx-auto px-4 py-8">
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-8">
+                <div>
+                    <h3 class="font-semibold text-gray-800 mb-4">How to Play</h3>
+                    <ul class="text-sm text-gray-600 space-y-2">
+                        <li>🎨 Create or join a room</li>
+                        <li>✏️ Draw the word when it's your turn</li>
+                        <li>🤔 Guess other players' drawings</li>
+                        <li>🏆 Score points for correct guesses</li>
+                    </ul>
+                </div>
+                <div>
+                    <h3 class="font-semibold text-gray-800 mb-4">Features</h3>
+                    <ul class="text-sm text-gray-600 space-y-2">
+                        <li>📱 Real-time multiplayer</li>
+                        <li>⚡ Fast-paced rounds</li>
+                        <li>🎯 Custom word lists</li>
+                        <li>⏸️ Game pause & controls</li>
+                    </ul>
+                </div>
+                <div>
+                    <h3 class="font-semibold text-gray-800 mb-4">About</h3>
+                    <p class="text-sm text-gray-600 mb-4">
+                        Wutizzit is a fun drawing and guessing game perfect for playing with friends and family. Test your artistic skills and deductive reasoning!
+                    </p>
+                    <div class="flex items-center space-x-4">
+                        <span class="text-2xl">🎨</span>
+                        <span class="text-sm text-gray-500">Made with ❤️ for creative minds</span>
+                    </div>
+                </div>
+            </div>
+            <div class="border-t border-gray-200 mt-8 pt-6 text-center text-sm text-gray-500">
+                © 2024 Wutizzit. All rights reserved. Have fun drawing!
+            </div>
+        </div>
+    </footer>
 
     <script src="/game.js"></script>
 </body>

@@ -228,6 +228,7 @@ class GameClient {
         this.currentWord = document.getElementById('current-word');
         this.wordHint = document.getElementById('word-hint');
         this.hintText = document.getElementById('hint-text');
+        this.letterCount = document.getElementById('letter-count');
         this.wordChoice = document.getElementById('word-choice');
         this.choiceTimer = document.getElementById('choice-timer');
         this.drawingTools = document.getElementById('drawing-tools');
@@ -807,6 +808,9 @@ class GameClient {
             // Show word hint for guessers
             if (data.wordHint) {
                 this.hintText.textContent = data.wordHint;
+                // Count letters (excluding spaces)
+                const letterCount = data.wordHint.replace(/[^a-zA-Z]/g, '').length;
+                this.letterCount.textContent = `(${letterCount} letters)`;
                 this.wordHint.classList.remove('hidden');
             }
         }
@@ -1119,7 +1123,7 @@ class GameClient {
             this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
             
             this.ctx.fillStyle = 'white';
-            this.ctx.font = 'bold 28px Arial';
+            this.ctx.font = 'bold 28px Inter, system-ui, sans-serif';
             this.ctx.textAlign = 'center';
             this.ctx.shadowColor = 'rgba(0, 0, 0, 0.5)';
             this.ctx.shadowBlur = 4;
@@ -1128,7 +1132,7 @@ class GameClient {
             
             this.ctx.fillText('Waiting for game to start...', this.canvas.width / 2, this.canvas.height / 2 - 20);
             
-            this.ctx.font = '18px Arial';
+            this.ctx.font = '18px Inter, system-ui, sans-serif';
             this.ctx.fillText('🎨 Get ready to draw and guess!', this.canvas.width / 2, this.canvas.height / 2 + 20);
             
             // Reset shadow
@@ -1241,11 +1245,11 @@ class GameClient {
         this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
         
         this.ctx.fillStyle = 'white';
-        this.ctx.font = 'bold 24px Arial';
+        this.ctx.font = 'bold 24px Inter, system-ui, sans-serif';
         this.ctx.textAlign = 'center';
         this.ctx.fillText('Waiting for game to start...', this.canvas.width / 2, this.canvas.height / 2);
         
-        this.ctx.font = '16px Arial';
+        this.ctx.font = '16px Inter, system-ui, sans-serif';
         this.ctx.fillText('🎨 Get ready to draw and guess!', this.canvas.width / 2, this.canvas.height / 2 + 40);
     }
 
