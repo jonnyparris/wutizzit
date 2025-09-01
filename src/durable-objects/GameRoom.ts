@@ -756,6 +756,9 @@ export class GameRoomObject extends DurableObject {
       this.currentRound = null;
       this.isGameActive = false;
       
+      // Update global stats to reflect game has ended
+      this.updateGlobalStats();
+      
       // Don't reset game entirely - let them start a new game if more players join
       setTimeout(() => {
         this.players.forEach(player => {
@@ -785,6 +788,9 @@ export class GameRoomObject extends DurableObject {
       },
       timestamp: Date.now()
     });
+    
+    // Update global stats to reflect game has ended
+    this.updateGlobalStats();
     
     // Reset for potential new game
     setTimeout(() => {
