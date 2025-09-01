@@ -7,10 +7,12 @@ import {
   handleWebSocket,
   handleGetStats,
   handleGetActiveGames,
-  handleBanPlayer
+  handleBanPlayer,
+  handlePauseGame
 } from './handlers/rooms';
 
 export { GameRoomObject } from './durable-objects/GameRoom';
+export { GlobalStatsObject } from './durable-objects/GlobalStats';
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -50,6 +52,8 @@ export default {
         response = await handleStartGame(request, env);
       } else if (url.pathname.match(/^\/rooms\/[^\/]+\/ban$/) && request.method === 'POST') {
         response = await handleBanPlayer(request, env);
+      } else if (url.pathname.match(/^\/rooms\/[^\/]+\/pause$/) && request.method === 'POST') {
+        response = await handlePauseGame(request, env);
       } else if (url.pathname.match(/^\/rooms\/[^\/]+\/ws$/) && request.headers.get('Upgrade') === 'websocket') {
         // WebSocket connections don't need CORS headers and they can't be modified
         return await handleWebSocket(request, env);
@@ -65,10 +69,19 @@ export default {
       }
 
       // Add CORS headers to the response (skip for WebSocket responses)
-      if (response.headers) {
+      if (response.headers && !response.headers.get('Upgrade')) {
         try {
+          // Create new response with CORS headers to avoid modifying immutable headers
+          const responseClone = response.clone();
+          const newHeaders = new Headers(response.headers);
           Object.entries(corsHeaders).forEach(([key, value]) => {
-            response.headers.set(key, value);
+            newHeaders.set(key, value);
+          });
+          
+          response = new Response(responseClone.body, {
+            status: response.status,
+            statusText: response.statusText,
+            headers: newHeaders
           });
         } catch (error) {
           console.warn('Could not set CORS headers:', error);

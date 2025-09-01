@@ -188,6 +188,24 @@
                                                 <option value="20">20</option>
                                             </select>
                                         </div>
+                                        <div class="flex items-center gap-2">
+                                            <label for="duration-setting" class="text-sm font-medium">Duration:</label>
+                                            <select id="duration-setting" class="px-2 py-1 border rounded">
+                                                <option value="30">30s</option>
+                                                <option value="60" selected>60s</option>
+                                                <option value="90">90s</option>
+                                                <option value="180">3min</option>
+                                            </select>
+                                        </div>
+                                        <div class="flex items-center gap-2">
+                                            <label for="word-choices-setting" class="text-sm font-medium">Word choices:</label>
+                                            <select id="word-choices-setting" class="px-2 py-1 border rounded">
+                                                <option value="2">2</option>
+                                                <option value="3" selected>3</option>
+                                                <option value="4">4</option>
+                                                <option value="5">5</option>
+                                            </select>
+                                        </div>
                                         <button 
                                             id="word-list-btn" 
                                             class="px-3 py-1 bg-purple-500 text-white rounded hover:bg-purple-600 text-sm"
@@ -231,9 +249,7 @@
                         <div id="word-choice" class="text-center mb-4 hidden">
                             <p class="text-lg font-semibold mb-3">Choose your word:</p>
                             <div class="flex gap-2 justify-center">
-                                <button id="word-choice-1" class="px-4 py-2 fun-button rounded-lg"></button>
-                                <button id="word-choice-2" class="px-4 py-2 fun-button rounded-lg"></button>
-                                <button id="word-choice-3" class="px-4 py-2 fun-button rounded-lg"></button>
+                                <!-- Word choice buttons will be generated dynamically -->
                             </div>
                             <p id="choice-timer" class="text-sm text-gray-600 mt-2">20 seconds to choose</p>
                         </div>
@@ -347,6 +363,55 @@
                     Cancel
                 </button>
             </div>
+        </div>
+    </div>
+
+    <!-- Winner Celebration Modal -->
+    <div id="winner-modal" class="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center hidden z-50">
+        <div class="bg-white rounded-lg shadow-xl max-w-2xl w-full mx-4 p-8 text-center">
+            <div class="mb-6">
+                <h2 class="text-4xl font-bold text-yellow-500 mb-4">🎉 Game Complete! 🎉</h2>
+                <div id="celebration-gif" class="mb-6">
+                    <!-- GIF will be loaded here -->
+                </div>
+            </div>
+            
+            <!-- Podium -->
+            <div class="flex justify-center items-end gap-4 mb-8">
+                <!-- 2nd Place -->
+                <div id="second-place" class="text-center">
+                    <div class="bg-gray-300 rounded-t-lg px-4 py-6 mb-2">
+                        <div class="text-2xl mb-2">🥈</div>
+                        <div class="font-bold text-sm" id="second-name">-</div>
+                        <div class="text-sm" id="second-score">0</div>
+                    </div>
+                    <div class="bg-gray-400 h-16 rounded-b-lg flex items-center justify-center text-white font-bold">2nd</div>
+                </div>
+                
+                <!-- 1st Place -->
+                <div id="first-place" class="text-center">
+                    <div class="bg-yellow-300 rounded-t-lg px-6 py-8 mb-2">
+                        <div class="text-3xl mb-2">🏆</div>
+                        <div class="font-bold text-lg" id="first-name">Winner</div>
+                        <div class="text-lg" id="first-score">0</div>
+                    </div>
+                    <div class="bg-yellow-500 h-20 rounded-b-lg flex items-center justify-center text-white font-bold text-lg">1st</div>
+                </div>
+                
+                <!-- 3rd Place -->
+                <div id="third-place" class="text-center">
+                    <div class="bg-orange-300 rounded-t-lg px-4 py-4 mb-2">
+                        <div class="text-xl mb-2">🥉</div>
+                        <div class="font-bold text-sm" id="third-name">-</div>
+                        <div class="text-sm" id="third-score">0</div>
+                    </div>
+                    <div class="bg-orange-500 h-12 rounded-b-lg flex items-center justify-center text-white font-bold">3rd</div>
+                </div>
+            </div>
+            
+            <button id="close-winner-modal" class="px-6 py-3 bg-blue-500 text-white rounded-lg hover:bg-blue-600 text-lg">
+                🏠 Return to Lobby
+            </button>
         </div>
     </div>
 

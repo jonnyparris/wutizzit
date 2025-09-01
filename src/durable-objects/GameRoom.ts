@@ -13,18 +13,33 @@ export class GameRoomObject extends DurableObject {
   private chatMessages: ChatMessage[] = [];
   private lastDrawerIndex: number = -1;
   private maxRounds: number = 10; // Game ends after 10 rounds
+  private roundDuration: number = 60; // Round duration in seconds (default 60s)  
+  private wordChoiceCount: number = 3; // Number of word choices for drawer (default 3)
   private roomCreatorId: string | null = null;
   private gameStarted: boolean = false;
   private customWords: string[] | null = null;
   private currentRoundNumber: number = 0;
   private bannedPlayers: Set<string> = new Set(); // Store banned player IDs
+  private usedWords: Set<string> = new Set(); // Track used words to prevent repetition
+  private roomId: string = "";
+  private isPaused: boolean = false; // Track if game is paused
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
   }
 
+  setRoomId(roomId: string) {
+    this.roomId = roomId;
+  }
+
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    
+    // Extract room ID from headers if provided
+    const roomIdHeader = request.headers.get('X-Room-ID');
+    if (roomIdHeader && !this.roomId) {
+      this.roomId = roomIdHeader;
+    }
     
     if (request.headers.get("Upgrade") === "websocket") {
       return this.handleWebSocket(request);
@@ -41,6 +56,10 @@ export class GameRoomObject extends DurableObject {
         return this.handleStartGame(request);
       case "/ban":
         return this.handleBanPlayer(request);
+      case "/pause":
+        return this.handlePauseGame(request);
+      case "/init":
+        return this.handleInitRoom(request);
       default:
         return new Response("Not found", { status: 404 });
     }
@@ -106,6 +125,9 @@ export class GameRoomObject extends DurableObject {
     }
 
     this.players.set(newPlayerId, player);
+    
+    // Update global stats
+    this.updateGlobalStats();
     
     this.broadcast({
       type: 'join',
@@ -214,12 +236,48 @@ export class GameRoomObject extends DurableObject {
     return Response.json({ success: true });
   }
 
+  private async handlePauseGame(request: Request): Promise<Response> {
+    const { playerId } = await request.json();
+    
+    // Only room creator can pause the game
+    if (playerId !== this.roomCreatorId) {
+      return Response.json({ error: "Only room creator can pause/unpause the game" }, { status: 403 });
+    }
+    
+    // Can only pause if game is active
+    if (!this.gameStarted || !this.currentRound) {
+      return Response.json({ error: "No active game to pause" }, { status: 400 });
+    }
+    
+    // Toggle pause state
+    this.isPaused = !this.isPaused;
+    
+    // Broadcast pause/unpause event
+    this.broadcast({
+      type: 'game-pause',
+      data: { isPaused: this.isPaused },
+      timestamp: Date.now()
+    });
+    
+    return Response.json({ success: true, isPaused: this.isPaused });
+  }
+
+  private async handleInitRoom(request: Request): Promise<Response> {
+    const { roomId } = await request.json() as any;
+    
+    if (roomId) {
+      this.setRoomId(roomId);
+    }
+    
+    return Response.json({ success: true });
+  }
+
   private handleGetState(): Response {
     return Response.json(this.getGameState());
   }
 
   private async handleStartGame(request: Request): Promise<Response> {
-    const { playerId, maxRounds, customWords } = await request.json();
+    const { playerId, maxRounds, roundDuration, wordChoiceCount, customWords } = await request.json();
     
     if (playerId !== this.roomCreatorId) {
       return Response.json({ error: "Only room creator can start the game" }, { status: 403 });
@@ -238,12 +296,25 @@ export class GameRoomObject extends DurableObject {
       this.maxRounds = maxRounds;
     }
     
+    if (roundDuration && [30, 60, 90, 180].includes(roundDuration)) {
+      this.roundDuration = roundDuration;
+    }
+    
+    if (wordChoiceCount && wordChoiceCount >= 2 && wordChoiceCount <= 5) {
+      this.wordChoiceCount = wordChoiceCount;
+    }
+    
     if (customWords && Array.isArray(customWords) && customWords.length >= 10) {
       this.customWords = customWords.map(word => String(word).trim()).filter(word => word.length > 0);
     }
 
     this.gameStarted = true;
     this.currentRoundNumber = 0; // Reset round counter for new game
+    this.usedWords.clear(); // Clear used words for the new game
+    
+    // Update global stats when game starts
+    this.updateGlobalStats();
+    
     this.startNewRound();
 
     return Response.json({ success: true });
@@ -376,15 +447,18 @@ export class GameRoomObject extends DurableObject {
     this.currentRoundNumber += 1;
     const roundNumber = this.currentRoundNumber;
     
-    // Generate 3 word choices
-    const wordChoices = [this.getRandomWord(), this.getRandomWord(), this.getRandomWord()];
+    // Generate word choices based on setting
+    const wordChoices = [];
+    for (let i = 0; i < this.wordChoiceCount; i++) {
+      wordChoices.push(this.getRandomWord());
+    }
     
     this.currentRound = {
       roundNumber,
       drawerId,
       word: '', // Will be set when drawer chooses
-      timeLeft: 60000, // 60 seconds
-      maxTime: 60000,
+      timeLeft: this.roundDuration * 1000, // Convert seconds to milliseconds
+      maxTime: this.roundDuration * 1000,
       isActive: true,
       guessedPlayers: new Set()
     };
@@ -457,17 +531,27 @@ export class GameRoomObject extends DurableObject {
         return;
       }
 
-      this.currentRound.timeLeft -= 1000;
-      
-      // Broadcast timer update
-      this.broadcast({
-        type: 'timer-update',
-        data: { timeLeft: this.currentRound.timeLeft },
-        timestamp: Date.now()
-      });
-      
-      if (this.currentRound.timeLeft <= 0) {
-        this.endRound();
+      // Only decrement time if game is not paused
+      if (!this.isPaused) {
+        this.currentRound.timeLeft -= 1000;
+        
+        // Broadcast timer update
+        this.broadcast({
+          type: 'timer-update',
+          data: { timeLeft: this.currentRound.timeLeft, isPaused: false },
+          timestamp: Date.now()
+        });
+        
+        if (this.currentRound.timeLeft <= 0) {
+          this.endRound();
+        }
+      } else {
+        // Still broadcast timer updates when paused to show pause state
+        this.broadcast({
+          type: 'timer-update',
+          data: { timeLeft: this.currentRound.timeLeft, isPaused: true },
+          timestamp: Date.now()
+        });
       }
     }, 1000);
   }
@@ -555,6 +639,9 @@ export class GameRoomObject extends DurableObject {
         this.endRound();
       }
       
+      // Update global stats
+      this.updateGlobalStats();
+      
       // Check if all players have left and end game if needed
       this.checkAndHandleEmptyRoom();
     }
@@ -593,10 +680,27 @@ export class GameRoomObject extends DurableObject {
 
   private getRandomWord(): string {
     const wordList = this.customWords || [];
+    let availableWords: string[];
+    
     if (wordList.length === 0) {
-      return getRandomWord(); // Fallback to default words
+      // Use default words from utils
+      const { WORDS } = require('../utils/words');
+      availableWords = WORDS.filter((word: string) => !this.usedWords.has(word.toLowerCase()));
+    } else {
+      // Use custom words
+      availableWords = wordList.filter(word => !this.usedWords.has(word.toLowerCase()));
     }
-    return wordList[Math.floor(Math.random() * wordList.length)];
+    
+    // If all words have been used, reset the used words set
+    if (availableWords.length === 0) {
+      this.usedWords.clear();
+      availableWords = wordList.length === 0 ? require('../utils/words').WORDS : wordList;
+    }
+    
+    const selectedWord = availableWords[Math.floor(Math.random() * availableWords.length)];
+    this.usedWords.add(selectedWord.toLowerCase());
+    
+    return selectedWord;
   }
 
   private checkAndHandleEmptyRoom() {
@@ -621,6 +725,43 @@ export class GameRoomObject extends DurableObject {
       });
       
       console.log('All players left, game ended and reset');
+      
+      // Unregister from global stats when room is empty
+      this.unregisterFromGlobalStats();
+    } else if (connectedPlayers.length === 1 && this.gameStarted) {
+      // Only one player left in an active game, end the game
+      console.log('Only one player remaining, ending game');
+      
+      this.broadcast({
+        type: 'game-end',
+        data: {
+          winner: connectedPlayers[0],
+          finalScores: [...this.players.values()]
+            .sort((a, b) => b.score - a.score)
+            .map(p => ({ username: p.username, score: p.score })),
+          reason: 'Only one player remaining'
+        },
+        timestamp: Date.now()
+      });
+      
+      // End the current round/game
+      if (this.roundTimer) {
+        clearInterval(this.roundTimer);
+        this.roundTimer = null;
+      }
+      
+      this.currentRound = null;
+      this.isGameActive = false;
+      
+      // Don't reset game entirely - let them start a new game if more players join
+      setTimeout(() => {
+        this.players.forEach(player => {
+          player.score = 0;
+        });
+        this.lastDrawerIndex = -1;
+        this.currentRoundNumber = 0;
+        this.gameStarted = false;
+      }, 10000); // Reset after 10 seconds
     }
   }
 
@@ -650,5 +791,49 @@ export class GameRoomObject extends DurableObject {
       this.lastDrawerIndex = -1;
       this.currentRoundNumber = 0;
     }, 10000); // Reset after 10 seconds
+  }
+
+  private async updateGlobalStats() {
+    try {
+      const env = this.env as any;
+      const globalStatsId = env.GLOBAL_STATS?.idFromName("global");
+      if (globalStatsId && this.roomId) {
+        const globalStats = env.GLOBAL_STATS.get(globalStatsId);
+        const statsData = {
+          roomId: this.roomId,
+          playerCount: this.players.size,
+          gameStarted: this.gameStarted
+        };
+        console.log(`Updating global stats for room ${this.roomId}:`, statsData);
+        await globalStats.fetch('http://localhost/update', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(statsData)
+        });
+      } else {
+        console.warn(`Cannot update global stats - globalStatsId: ${globalStatsId}, roomId: ${this.roomId}`);
+      }
+    } catch (error) {
+      console.warn('Failed to update global stats:', error);
+    }
+  }
+
+  private async unregisterFromGlobalStats() {
+    try {
+      const env = this.env as any;
+      const globalStatsId = env.GLOBAL_STATS?.idFromName("global");
+      if (globalStatsId) {
+        const globalStats = env.GLOBAL_STATS.get(globalStatsId);
+        await globalStats.fetch('http://localhost/unregister', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            roomId: this.roomId
+          })
+        });
+      }
+    } catch (error) {
+      console.warn('Failed to unregister from global stats:', error);
+    }
   }
 }

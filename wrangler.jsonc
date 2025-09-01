@@ -10,7 +10,8 @@
 	"migrations": [
 		{
 			"new_sqlite_classes": [
-				"GameRoomObject"
+				"GameRoomObject",
+				"GlobalStatsObject"
 			],
 			"tag": "v1"
 		}
@@ -24,6 +25,10 @@
 			{
 				"class_name": "GameRoomObject",
 				"name": "GAME_ROOM"
+			},
+			{
+				"class_name": "GlobalStatsObject",
+				"name": "GLOBAL_STATS"
 			}
 		]
 	},

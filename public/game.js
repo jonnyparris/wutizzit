@@ -20,6 +20,7 @@ class GameClient {
         this.generateRandomUsername();
         this.updateHomePageStats();
         this.initAudio();
+        this.startStatsRefreshTimer();
     }
 
     initAudio() {
@@ -108,8 +109,8 @@ class GameClient {
                     gameDiv.className = 'p-2 bg-white rounded border cursor-pointer hover:bg-gray-50';
                     
                     const statusText = game.gameStarted 
-                        ? `${game.players} players • Round ${game.round}/${game.maxRounds}`
-                        : `${game.players} players • Waiting to start`;
+                        ? `${game.playerCount} players • In game`
+                        : `${game.playerCount} players • Waiting to start`;
                     
                     gameDiv.innerHTML = `
                         <div class="flex justify-between items-center">
@@ -137,6 +138,28 @@ class GameClient {
             // Fallback to static numbers
             document.getElementById('active-games').textContent = '0';
             document.getElementById('total-players').textContent = '0';
+        }
+    }
+
+    startStatsRefreshTimer() {
+        // Clear existing timer if it exists
+        if (this.statsRefreshInterval) {
+            clearInterval(this.statsRefreshInterval);
+        }
+        
+        // Update stats every 5 seconds when on homepage
+        this.statsRefreshInterval = setInterval(() => {
+            // Only refresh if we're on the homepage
+            if (!this.homeScreen.classList.contains('hidden')) {
+                this.updateHomePageStats();
+            }
+        }, 5000);
+    }
+
+    stopStatsRefreshTimer() {
+        if (this.statsRefreshInterval) {
+            clearInterval(this.statsRefreshInterval);
+            this.statsRefreshInterval = null;
         }
     }
 
@@ -207,9 +230,6 @@ class GameClient {
         this.hintText = document.getElementById('hint-text');
         this.wordChoice = document.getElementById('word-choice');
         this.choiceTimer = document.getElementById('choice-timer');
-        this.wordChoice1 = document.getElementById('word-choice-1');
-        this.wordChoice2 = document.getElementById('word-choice-2');
-        this.wordChoice3 = document.getElementById('word-choice-3');
         this.drawingTools = document.getElementById('drawing-tools');
         this.playersListContainer = document.getElementById('players-list');
         this.chatMessages = document.getElementById('chat-messages');
@@ -232,11 +252,24 @@ class GameClient {
         // Game settings (for room creator)
         this.gameSettings = document.getElementById('game-settings');
         this.roundsSetting = document.getElementById('rounds-setting');
+        this.durationSetting = document.getElementById('duration-setting');
+        this.wordChoicesSetting = document.getElementById('word-choices-setting');
         this.wordListBtn = document.getElementById('word-list-btn');
         this.wordListModal = document.getElementById('word-list-modal');
         this.customWordsTextarea = document.getElementById('custom-words');
         this.saveWordsBtn = document.getElementById('save-words-btn');
         this.cancelWordsBtn = document.getElementById('cancel-words-btn');
+
+        // Winner modal elements
+        this.winnerModal = document.getElementById('winner-modal');
+        this.celebrationGif = document.getElementById('celebration-gif');
+        this.firstPlacePlayer = document.getElementById('first-place-player');
+        this.firstPlaceScore = document.getElementById('first-place-score');
+        this.secondPlacePlayer = document.getElementById('second-place-player');
+        this.secondPlaceScore = document.getElementById('second-place-score');
+        this.thirdPlacePlayer = document.getElementById('third-place-player');
+        this.thirdPlaceScore = document.getElementById('third-place-score');
+        this.closeWinnerModalBtn = document.getElementById('close-winner-modal');
         this.pauseGameBtn = document.getElementById('pause-game-btn');
         
         // Canvas state stack for undo functionality
@@ -248,6 +281,7 @@ class GameClient {
         
         // Game settings
         this.maxRounds = 10; // Default, will be updated by server
+        this.statsRefreshInterval = null; // Timer for refreshing homepage stats
     }
 
     setupEventListeners() {
@@ -283,6 +317,9 @@ class GameClient {
         this.saveWordsBtn.addEventListener('click', () => this.saveCustomWords());
         this.cancelWordsBtn.addEventListener('click', () => this.closeWordListModal());
         this.pauseGameBtn.addEventListener('click', () => this.togglePauseGame());
+        
+        // Winner modal event listener
+        this.closeWinnerModalBtn.addEventListener('click', () => this.closeWinnerModal());
         
         // Color picker event listeners
         document.addEventListener('click', (e) => {
@@ -453,6 +490,11 @@ class GameClient {
                     this.gameSettings.classList.remove('hidden');
                     this.gameStatus.textContent = '⏳ Waiting for more players. You can start the game when ready.';
                 }
+                
+                // Load lobby background image if game hasn't started
+                if (!data.gameStarted) {
+                    this.loadLobbyBackgroundImage();
+                }
             } else {
                 alert(data.error || 'Failed to join room');
             }
@@ -544,6 +586,9 @@ class GameClient {
             case 'player-banned':
                 this.handlePlayerBanned(message.data);
                 break;
+            case 'game-pause':
+                this.handleGamePause(message.data);
+                break;
         }
     }
 
@@ -565,6 +610,10 @@ class GameClient {
         } else {
             // Before game starts
             this.roundInfo.textContent = `Round 0 of ${this.maxRounds}`;
+            // Load lobby background if game hasn't started
+            if (!gameState.gameStarted) {
+                this.loadLobbyBackgroundImage();
+            }
         }
         
         if (gameState.chatMessages) {
@@ -781,10 +830,20 @@ class GameClient {
     handleTimerUpdate(data) {
         this.updateTimer(data.timeLeft);
         
-        // Play ticking sound for final 10 seconds
-        const secondsLeft = Math.floor(data.timeLeft / 1000);
-        if (secondsLeft <= 10 && secondsLeft > 0) {
-            this.playSoundEffect('timer-tick');
+        // Show pause indicator if game is paused
+        if (data.isPaused) {
+            const timerElement = this.timer;
+            if (!timerElement.textContent.includes('⏸️')) {
+                timerElement.textContent += ' ⏸️';
+            }
+        }
+        
+        // Play ticking sound for final 10 seconds (but not when paused)
+        if (!data.isPaused) {
+            const secondsLeft = Math.floor(data.timeLeft / 1000);
+            if (secondsLeft <= 10 && secondsLeft > 0) {
+                this.playSoundEffect('timer-tick');
+            }
         }
     }
 
@@ -857,25 +916,31 @@ class GameClient {
     }
 
     handleWordChoice(data) {
-        // Show word choices to drawer
-        this.wordChoice1.textContent = data.wordChoices[0];
-        this.wordChoice2.textContent = data.wordChoices[1];
-        this.wordChoice3.textContent = data.wordChoices[2];
+        // Clear existing word choice buttons
+        const wordChoiceContainer = this.wordChoice.querySelector('.flex');
+        wordChoiceContainer.innerHTML = '';
         
-        this.wordChoice1.onclick = () => this.chooseWord(data.wordChoices[0]);
-        this.wordChoice2.onclick = () => this.chooseWord(data.wordChoices[1]);
-        this.wordChoice3.onclick = () => this.chooseWord(data.wordChoices[2]);
+        // Dynamically create buttons for each word choice
+        data.wordChoices.forEach((word, index) => {
+            const button = document.createElement('button');
+            button.id = `word-choice-${index + 1}`;
+            button.className = 'px-4 py-2 fun-button rounded-lg';
+            button.textContent = word;
+            button.onclick = () => this.chooseWord(word);
+            wordChoiceContainer.appendChild(button);
+        });
         
         this.wordChoice.classList.remove('hidden');
         this.gameStatus.textContent = '📝 Choose your word to draw!';
         
         // Start choice timer
         let timeLeft = 20;
-        const timer = setInterval(() => {
+        this.choiceTimerInterval = setInterval(() => {
             timeLeft--;
             this.choiceTimer.textContent = `${timeLeft} seconds to choose`;
             if (timeLeft <= 0) {
-                clearInterval(timer);
+                clearInterval(this.choiceTimerInterval);
+                this.choiceTimerInterval = null;
                 // Auto-choose first word if time runs out
                 this.chooseWord(data.wordChoices[0]);
             }
@@ -896,6 +961,12 @@ class GameClient {
     }
 
     chooseWord(word) {
+        // Clear the choice timer if it's running
+        if (this.choiceTimerInterval) {
+            clearInterval(this.choiceTimerInterval);
+            this.choiceTimerInterval = null;
+        }
+        
         this.wordChoice.classList.add('hidden');
         
         if (this.socket && this.socket.readyState === WebSocket.OPEN) {
@@ -994,10 +1065,188 @@ class GameClient {
                 timestamp: Date.now()
             }));
         }
+    }
+
+    async loadLobbyBackgroundImage() {
+        // Use a beautiful gradient background with geometric patterns instead of external images
+        // This avoids CORS issues and ensures consistent loading
+        this.createLobbyBackground();
+    }
+
+    createLobbyBackground() {
+        try {
+            // Clear canvas first
+            this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+            
+            // Create multiple gradient backgrounds to choose from
+            const gradients = [
+                // Purple to blue
+                ['#667eea', '#764ba2'],
+                // Orange to pink  
+                ['#f093fb', '#f5576c'],
+                // Green to teal
+                ['#4facfe', '#00f2fe'],
+                // Sunset colors
+                ['#fa709a', '#fee140'],
+                // Ocean colors
+                ['#a8edea', '#fed6e3'],
+                // Northern lights
+                ['#d299c2', '#fef9d7'],
+                // Fire colors
+                ['#fdbb2d', '#22c1c3'],
+                // Space colors
+                ['#2196f3', '#21cbf3']
+            ];
+            
+            const randomGradient = gradients[Math.floor(Math.random() * gradients.length)];
+            
+            // Create radial gradient for more visual interest
+            const gradient = this.ctx.createRadialGradient(
+                this.canvas.width / 2, this.canvas.height / 2, 0,
+                this.canvas.width / 2, this.canvas.height / 2, Math.max(this.canvas.width, this.canvas.height) / 2
+            );
+            gradient.addColorStop(0, randomGradient[0]);
+            gradient.addColorStop(1, randomGradient[1]);
+            
+            this.ctx.fillStyle = gradient;
+            this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+            
+            // Add some geometric shapes for visual interest
+            this.addGeometricPatterns();
+            
+            // Add overlay and text
+            this.ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+            this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+            
+            this.ctx.fillStyle = 'white';
+            this.ctx.font = 'bold 28px Arial';
+            this.ctx.textAlign = 'center';
+            this.ctx.shadowColor = 'rgba(0, 0, 0, 0.5)';
+            this.ctx.shadowBlur = 4;
+            this.ctx.shadowOffsetX = 2;
+            this.ctx.shadowOffsetY = 2;
+            
+            this.ctx.fillText('Waiting for game to start...', this.canvas.width / 2, this.canvas.height / 2 - 20);
+            
+            this.ctx.font = '18px Arial';
+            this.ctx.fillText('🎨 Get ready to draw and guess!', this.canvas.width / 2, this.canvas.height / 2 + 20);
+            
+            // Reset shadow
+            this.ctx.shadowColor = 'transparent';
+            this.ctx.shadowBlur = 0;
+            this.ctx.shadowOffsetX = 0;
+            this.ctx.shadowOffsetY = 0;
+            
+        } catch (error) {
+            console.warn('Failed to create lobby background:', error);
+            this.showLobbyText();
+        }
+    }
+
+    addGeometricPatterns() {
+        const patterns = [
+            () => this.drawCirclePattern(),
+            () => this.drawTrianglePattern(),
+            () => this.drawHexagonPattern(),
+            () => this.drawWavePattern()
+        ];
         
-        // Clear canvas states and update undo button
-        this.canvasStates = [];
-        this.updateUndoButton();
+        // Randomly choose a pattern
+        const randomPattern = patterns[Math.floor(Math.random() * patterns.length)];
+        randomPattern();
+    }
+
+    drawCirclePattern() {
+        this.ctx.fillStyle = 'rgba(255, 255, 255, 0.1)';
+        for (let i = 0; i < 8; i++) {
+            const x = Math.random() * this.canvas.width;
+            const y = Math.random() * this.canvas.height;
+            const radius = 20 + Math.random() * 60;
+            this.ctx.beginPath();
+            this.ctx.arc(x, y, radius, 0, Math.PI * 2);
+            this.ctx.fill();
+        }
+    }
+
+    drawTrianglePattern() {
+        this.ctx.fillStyle = 'rgba(255, 255, 255, 0.08)';
+        for (let i = 0; i < 6; i++) {
+            const x = Math.random() * this.canvas.width;
+            const y = Math.random() * this.canvas.height;
+            const size = 30 + Math.random() * 50;
+            
+            this.ctx.beginPath();
+            this.ctx.moveTo(x, y - size/2);
+            this.ctx.lineTo(x - size/2, y + size/2);
+            this.ctx.lineTo(x + size/2, y + size/2);
+            this.ctx.closePath();
+            this.ctx.fill();
+        }
+    }
+
+    drawHexagonPattern() {
+        this.ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
+        this.ctx.lineWidth = 2;
+        for (let i = 0; i < 4; i++) {
+            const x = Math.random() * this.canvas.width;
+            const y = Math.random() * this.canvas.height;
+            const size = 25 + Math.random() * 40;
+            
+            this.ctx.beginPath();
+            for (let j = 0; j < 6; j++) {
+                const angle = (j * Math.PI) / 3;
+                const px = x + size * Math.cos(angle);
+                const py = y + size * Math.sin(angle);
+                if (j === 0) {
+                    this.ctx.moveTo(px, py);
+                } else {
+                    this.ctx.lineTo(px, py);
+                }
+            }
+            this.ctx.closePath();
+            this.ctx.stroke();
+        }
+    }
+
+    drawWavePattern() {
+        this.ctx.strokeStyle = 'rgba(255, 255, 255, 0.12)';
+        this.ctx.lineWidth = 3;
+        
+        for (let i = 0; i < 3; i++) {
+            const startY = (this.canvas.height / 4) * (i + 1);
+            const amplitude = 20 + Math.random() * 30;
+            const frequency = 0.01 + Math.random() * 0.02;
+            const phase = Math.random() * Math.PI * 2;
+            
+            this.ctx.beginPath();
+            for (let x = 0; x <= this.canvas.width; x += 5) {
+                const y = startY + amplitude * Math.sin(frequency * x + phase);
+                if (x === 0) {
+                    this.ctx.moveTo(x, y);
+                } else {
+                    this.ctx.lineTo(x, y);
+                }
+            }
+            this.ctx.stroke();
+        }
+    }
+
+    showLobbyText() {
+        // Fallback lobby display with gradient background
+        const gradient = this.ctx.createLinearGradient(0, 0, this.canvas.width, this.canvas.height);
+        gradient.addColorStop(0, '#667eea');
+        gradient.addColorStop(1, '#764ba2');
+        
+        this.ctx.fillStyle = gradient;
+        this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+        
+        this.ctx.fillStyle = 'white';
+        this.ctx.font = 'bold 24px Arial';
+        this.ctx.textAlign = 'center';
+        this.ctx.fillText('Waiting for game to start...', this.canvas.width / 2, this.canvas.height / 2);
+        
+        this.ctx.font = '16px Arial';
+        this.ctx.fillText('🎨 Get ready to draw and guess!', this.canvas.width / 2, this.canvas.height / 2 + 40);
     }
 
     saveCanvasState() {
@@ -1259,45 +1508,74 @@ class GameClient {
         }, 3000);
     }
 
-    togglePauseGame() {
-        // Simple pause implementation - just disable/enable drawing and chat
-        const isPaused = this.pauseGameBtn.textContent.includes('⏸️');
+    async togglePauseGame() {
+        if (!this.isCreator || !this.playerId || !this.roomId) {
+            return;
+        }
+
+        try {
+            const response = await fetch(`/rooms/${this.roomId}/pause`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ playerId: this.playerId })
+            });
+
+            const data = await response.json();
+            if (!response.ok) {
+                alert(data.error || 'Failed to pause/resume game');
+            }
+            // The server will broadcast the pause state change to all players
+        } catch (error) {
+            console.error('Error toggling pause:', error);
+            alert('Failed to pause/resume game');
+        }
+    }
+
+    handleGamePause(data) {
+        const isPaused = data.isPaused;
         
         if (isPaused) {
-            // Unpause
-            this.pauseGameBtn.innerHTML = '⏸️ Pause';
-            this.pauseGameBtn.classList.remove('bg-green-500', 'hover:bg-green-600');
-            this.pauseGameBtn.classList.add('bg-orange-500', 'hover:bg-orange-600');
-            this.gameStatus.textContent = '▶️ Game resumed!';
-            
-            // Re-enable interactions
-            if (this.isDrawer) {
-                this.canvas.classList.remove('disabled-canvas');
-                this.drawingTools.classList.remove('hidden');
-            } else if (!this.chatInput.disabled) {
-                this.chatInput.disabled = false;
+            // Game is paused
+            if (this.isCreator) {
+                this.pauseGameBtn.innerHTML = '▶️ Resume';
+                this.pauseGameBtn.classList.remove('bg-orange-500', 'hover:bg-orange-600');
+                this.pauseGameBtn.classList.add('bg-green-500', 'hover:bg-green-600');
             }
-        } else {
-            // Pause
-            this.pauseGameBtn.innerHTML = '▶️ Resume';
-            this.pauseGameBtn.classList.remove('bg-orange-500', 'hover:bg-orange-600');
-            this.pauseGameBtn.classList.add('bg-green-500', 'hover:bg-green-600');
             this.gameStatus.textContent = '⏸️ Game paused by room creator';
             
-            // Disable interactions
+            // Disable interactions for all players
             this.canvas.classList.add('disabled-canvas');
             this.drawingTools.classList.add('hidden');
             this.chatInput.disabled = true;
+            this.chatInput.placeholder = 'Game is paused...';
+        } else {
+            // Game is resumed
+            if (this.isCreator) {
+                this.pauseGameBtn.innerHTML = '⏸️ Pause';
+                this.pauseGameBtn.classList.remove('bg-green-500', 'hover:bg-green-600');
+                this.pauseGameBtn.classList.add('bg-orange-500', 'hover:bg-orange-600');
+            }
+            
+            // Re-enable interactions based on player role
+            if (this.isDrawer) {
+                this.canvas.classList.remove('disabled-canvas');
+                this.drawingTools.classList.remove('hidden');
+                this.gameStatus.textContent = '🎨 You are drawing!';
+                this.chatInput.disabled = true;
+                this.chatInput.placeholder = 'You cannot guess while drawing';
+            } else {
+                this.gameStatus.textContent = '🤔 Guess the drawing!';
+                this.chatInput.disabled = false;
+                this.chatInput.placeholder = 'Type your guess...';
+            }
         }
         
-        // Show temporary status message
-        setTimeout(() => {
-            if (this.isDrawer) {
-                this.gameStatus.textContent = isPaused ? '🎨 You are drawing!' : '⏸️ Game paused by room creator';
-            } else {
-                this.gameStatus.textContent = isPaused ? '🤔 Guess the drawing!' : '⏸️ Game paused by room creator';
-            }
-        }, 2000);
+        this.addChatMessage({
+            username: 'System',
+            message: isPaused ? '⏸️ Game paused' : '▶️ Game resumed',
+            timestamp: Date.now(),
+            isGuess: false
+        });
     }
 
     handlePlayerBanned(data) {
@@ -1346,10 +1624,19 @@ class GameClient {
     }
 
     async leaveRoom() {
+        // Clean up timers
+        if (this.choiceTimerInterval) {
+            clearInterval(this.choiceTimerInterval);
+            this.choiceTimerInterval = null;
+        }
+        
+        // Close WebSocket connection
         if (this.socket) {
             this.socket.close();
+            this.socket = null;
         }
 
+        // Notify server we're leaving
         if (this.roomId && this.playerId) {
             try {
                 await fetch(`/rooms/${this.roomId}/leave`, {
@@ -1362,32 +1649,45 @@ class GameClient {
             }
         }
 
+        // Reset game state
+        this.playerId = null;
+        this.roomId = null;
+        this.isDrawer = false;
+        this.isDrawing = false;
+        this.customWords = null;
+
         this.showHomeScreen();
     }
 
     handleGameEnd(data) {
-        this.gameStatus.textContent = `🎉 Game Over! Winner: ${data.winner.username}`;
+        let statusMessage = `🎉 Game Over! Winner: ${data.winner.username}`;
+        let chatMessage = `🎉 Game finished! 🥇 Winner: ${data.winner.username}`;
+        
+        // Handle different end reasons
+        if (data.reason === 'Only one player remaining') {
+            statusMessage = `🚪 Game ended - only one player remaining`;
+            chatMessage = `🚪 Game ended because only one player remained. ${data.winner.username} wins by default!`;
+        }
+        
+        this.gameStatus.textContent = statusMessage;
         
         // Add game end message to chat
         this.addChatMessage({
             username: 'System',
-            message: `🎉 Game finished! 🥇 Winner: ${data.winner.username}`,
+            message: chatMessage,
             timestamp: Date.now()
         });
 
-        // Show final scores
-        const scoresMessage = data.finalScores.map((player, index) => 
-            `${index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : '👤'} ${player.username}: ${player.score}`
-        ).join('\n');
-        
+        // Show winner celebration modal
         setTimeout(() => {
-            alert(`🎉 Game Over!\n\n${scoresMessage}`);
+            this.showWinnerModal(data.finalScores);
         }, 1000);
     }
 
     showGameScreen() {
         this.homeScreen.classList.add('hidden');
         this.gameScreen.classList.remove('hidden');
+        this.stopStatsRefreshTimer(); // Stop refreshing stats when in game
     }
 
     showHomeScreen() {
@@ -1397,6 +1697,8 @@ class GameClient {
         this.playerId = null;
         this.roomId = null;
         this.isDrawer = false;
+        this.startStatsRefreshTimer(); // Resume refreshing stats when back on homepage
+        this.updateHomePageStats(); // Immediate update when returning to homepage
     }
 
     async startGame() {
@@ -1408,6 +1710,8 @@ class GameClient {
             const gameSettings = {
                 playerId: this.playerId,
                 maxRounds: parseInt(this.roundsSetting.value),
+                roundDuration: parseInt(this.durationSetting.value),
+                wordChoiceCount: parseInt(this.wordChoicesSetting.value),
                 customWords: this.customWords || null
             };
 
@@ -1433,6 +1737,64 @@ class GameClient {
             console.error('Error starting game:', error);
             alert('Failed to start game');
         }
+    }
+
+    async showWinnerModal(finalScores) {
+        // Get random celebration GIF
+        const celebrationGif = await this.getRandomCelebrationGif();
+        this.celebrationGif.src = celebrationGif;
+        
+        // Populate podium with top 3 players
+        const topPlayers = finalScores.slice(0, 3);
+        
+        // First place (always exists)
+        if (topPlayers[0]) {
+            this.firstPlacePlayer.textContent = topPlayers[0].username;
+            this.firstPlaceScore.textContent = `${topPlayers[0].score} pts`;
+        }
+        
+        // Second place (might not exist)
+        if (topPlayers[1]) {
+            this.secondPlacePlayer.textContent = topPlayers[1].username;
+            this.secondPlaceScore.textContent = `${topPlayers[1].score} pts`;
+            this.secondPlacePlayer.parentElement.style.display = 'block';
+        } else {
+            this.secondPlacePlayer.parentElement.style.display = 'none';
+        }
+        
+        // Third place (might not exist)
+        if (topPlayers[2]) {
+            this.thirdPlacePlayer.textContent = topPlayers[2].username;
+            this.thirdPlaceScore.textContent = `${topPlayers[2].score} pts`;
+            this.thirdPlacePlayer.parentElement.style.display = 'block';
+        } else {
+            this.thirdPlacePlayer.parentElement.style.display = 'none';
+        }
+        
+        // Show the modal
+        this.winnerModal.classList.remove('hidden');
+    }
+
+    closeWinnerModal() {
+        this.winnerModal.classList.add('hidden');
+    }
+
+    async getRandomCelebrationGif() {
+        const celebrationGifs = [
+            'https://media.giphy.com/media/26u4cqiYI30juCOGY/giphy.gif',
+            'https://media.giphy.com/media/3oz8xAFtqoOUUrsh7W/giphy.gif',
+            'https://media.giphy.com/media/26u4kr0pRWGkXaDa0/giphy.gif',
+            'https://media.giphy.com/media/l0MYt5jPR6QX5pnqM/giphy.gif',
+            'https://media.giphy.com/media/26tOZ42Mg6pbTUPHW/giphy.gif',
+            'https://media.giphy.com/media/3o6fJ1BM7R2EBRDnxK/giphy.gif',
+            'https://media.giphy.com/media/3oKIPf3C7HqqYBVcCk/giphy.gif',
+            'https://media.giphy.com/media/l0HlJUmLPPX99gtuo/giphy.gif',
+            'https://media.giphy.com/media/26uf759LlDftqZNVm/giphy.gif',
+            'https://media.giphy.com/media/3o7abKhOpu0NwenH3O/giphy.gif'
+        ];
+        
+        const randomIndex = Math.floor(Math.random() * celebrationGifs.length);
+        return celebrationGifs[randomIndex];
     }
 }
 
