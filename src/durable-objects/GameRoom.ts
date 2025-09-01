@@ -148,7 +148,7 @@ export class GameRoomObject extends DurableObject {
   }
 
   private async handleLeave(request: Request): Promise<Response> {
-    const { playerId } = await request.json();
+    const { playerId } = await request.json() as any;
     
     if (!this.players.has(playerId)) {
       return Response.json({ error: "Player not found" }, { status: 404 });
@@ -184,6 +184,9 @@ export class GameRoomObject extends DurableObject {
     if (this.currentRound && this.currentRound.drawerId === playerId) {
       this.endRound();
     }
+    
+    // Update global stats with new player count
+    this.updateGlobalStats();
     
     // Check if all players have left and end game if needed
     this.checkAndHandleEmptyRoom();
