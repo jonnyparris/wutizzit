@@ -411,6 +411,9 @@ export class GameRoomObject extends DurableObject {
         this.endRound();
         return;
       }
+    } else {
+      // Mark incorrect guesses explicitly
+      chatMessage.isCorrect = false;
     }
 
     this.chatMessages.push(chatMessage);
@@ -662,8 +665,16 @@ export class GameRoomObject extends DurableObject {
   }
 
   private getGameState() {
+    // Only include connected players in the game state
+    const connectedPlayers = new Map();
+    for (const [id, player] of this.players) {
+      if (player.isConnected) {
+        connectedPlayers.set(id, player);
+      }
+    }
+    
     return {
-      players: Object.fromEntries(this.players),
+      players: Object.fromEntries(connectedPlayers),
       currentRound: this.currentRound ? {
         ...this.currentRound,
         word: undefined, // Don't send word in state

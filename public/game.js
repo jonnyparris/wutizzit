@@ -818,8 +818,8 @@ class GameClient {
             // Show word hint for guessers
             if (data.wordHint) {
                 this.hintText.textContent = data.wordHint;
-                // Count letters (excluding spaces)
-                const letterCount = data.wordHint.replace(/[^a-zA-Z]/g, '').length;
+                // Count letters by counting underscores (which represent letters)
+                const letterCount = data.wordHint.replace(/[^_]/g, '').length;
                 this.letterCount.textContent = `(${letterCount} letters)`;
                 this.wordHint.classList.remove('hidden');
             }
