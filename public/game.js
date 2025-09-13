@@ -22,6 +22,71 @@ class GameClient {
         this.updateHomePageStats();
         this.initAudio();
         this.startStatsRefreshTimer();
+        this.handleUrlRouting();
+        
+        // Handle browser back/forward navigation
+        window.addEventListener('popstate', (event) => {
+            this.handleUrlRouting();
+        });
+    }
+    
+    handleUrlRouting() {
+        const path = window.location.pathname;
+        const roomMatch = path.match(/^\/room\/([A-Z0-9]{6})$/i);
+        
+        if (roomMatch) {
+            const roomId = roomMatch[1].toUpperCase();
+            // Auto-join the room if we have a username and aren't already in a game
+            if (this.usernameInput.value && !this.roomId) {
+                this.roomInput.value = roomId;
+                this.joinRoom(roomId);
+            } else if (!this.usernameInput.value) {
+                // Show room ID in input but don't auto-join until username is provided
+                this.roomInput.value = roomId;
+            }
+        }
+    }
+    
+    updateUrl(roomId) {
+        const newUrl = roomId ? `/room/${roomId}` : '/';
+        if (window.location.pathname !== newUrl) {
+            window.history.pushState({ roomId }, '', newUrl);
+        }
+    }
+    
+    async copyRoomLink() {
+        if (!this.roomId) return;
+        
+        const roomUrl = `${window.location.origin}/room/${this.roomId}`;
+        
+        try {
+            await navigator.clipboard.writeText(roomUrl);
+            // Briefly change button text to show success
+            const originalText = this.copyRoomLinkBtn.innerHTML;
+            this.copyRoomLinkBtn.innerHTML = '✅ Copied!';
+            this.copyRoomLinkBtn.disabled = true;
+            
+            setTimeout(() => {
+                this.copyRoomLinkBtn.innerHTML = originalText;
+                this.copyRoomLinkBtn.disabled = false;
+            }, 2000);
+        } catch (error) {
+            // Fallback for older browsers
+            const textArea = document.createElement('textarea');
+            textArea.value = roomUrl;
+            document.body.appendChild(textArea);
+            textArea.select();
+            try {
+                document.execCommand('copy');
+                this.copyRoomLinkBtn.innerHTML = '✅ Copied!';
+                setTimeout(() => {
+                    this.copyRoomLinkBtn.innerHTML = '📋 Share Link';
+                }, 2000);
+            } catch (fallbackError) {
+                alert(`Copy failed. Room URL: ${roomUrl}`);
+            }
+            document.body.removeChild(textArea);
+        }
     }
 
     initAudio() {
@@ -273,6 +338,7 @@ class GameClient {
         this.thirdPlaceScore = document.getElementById('third-place-score');
         this.closeWinnerModalBtn = document.getElementById('close-winner-modal');
         this.pauseGameBtn = document.getElementById('pause-game-btn');
+        this.copyRoomLinkBtn = document.getElementById('copy-room-link');
         
         // Canvas state stack for undo functionality
         this.canvasStates = [];
@@ -319,6 +385,7 @@ class GameClient {
         this.saveWordsBtn.addEventListener('click', () => this.saveCustomWords());
         this.cancelWordsBtn.addEventListener('click', () => this.closeWordListModal());
         this.pauseGameBtn.addEventListener('click', () => this.togglePauseGame());
+        this.copyRoomLinkBtn.addEventListener('click', () => this.copyRoomLink());
         
         // Winner modal event listener
         this.closeWinnerModalBtn.addEventListener('click', () => this.closeWinnerModal());
@@ -482,6 +549,9 @@ class GameClient {
                 this.roomId = roomId;
                 this.isCreator = data.isCreator;
                 this.roomIdDisplay.textContent = roomId;
+                
+                // Update URL to reflect the room
+                this.updateUrl(roomId);
                 
                 this.showGameScreen();
                 this.connectWebSocket(data.websocketUrl || `/rooms/${roomId}/ws?playerId=${this.playerId}`);
@@ -1779,6 +1849,10 @@ class GameClient {
         this.roomId = null;
         this.isDrawer = false;
         this.currentDrawerId = null;
+        
+        // Update URL back to homepage
+        this.updateUrl(null);
+        
         this.startStatsRefreshTimer(); // Resume refreshing stats when back on homepage
         this.updateHomePageStats(); // Immediate update when returning to homepage
     }

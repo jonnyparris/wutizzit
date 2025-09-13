@@ -204,7 +204,12 @@
                     <div class="game-card p-4 mb-4">
                         <div class="flex justify-between items-center">
                             <div>
-                                <h2 class="text-xl font-bold">Room: <span id="room-id-display"></span></h2>
+                                <div class="flex items-center gap-2 mb-1">
+                                    <h2 class="text-xl font-bold">Room: <span id="room-id-display"></span></h2>
+                                    <button id="copy-room-link" class="px-2 py-1 text-xs bg-blue-500 text-white rounded hover:bg-blue-600" title="Copy room link">
+                                        📋 Share Link
+                                    </button>
+                                </div>
                                 <p id="game-status" class="text-gray-600">Waiting for players...</p>
                                 <!-- Game Settings (only visible to room creator) -->
                                 <div id="game-settings" class="mt-2 hidden">
