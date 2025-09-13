@@ -8,7 +8,7 @@
 - [x] the character count total is always zero
 - [x] player list does not update when a player leaves the game
 - [x] when a player guesses incorrectly the chat message to everyone else says that they guessed correctly
-- [] the selectable number of rounds should be a multiple of the number of players so that everyone gets a chance to draw at least once
+- [x] the selectable number of rounds should be a multiple of the number of players so that everyone gets a chance to draw at least once
 - [] each game room should have a unique url for others to join
 - [] 100 new funny pictionary words should be loaded each day from somewhere
 - [] add more cheeky words for generating player names

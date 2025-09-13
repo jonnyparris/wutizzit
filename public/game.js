@@ -667,6 +667,52 @@ class GameClient {
                 `;
                 this.playersListContainer.appendChild(playerDiv);
             });
+            
+        // Update round options based on player count (for fair turns)
+        this.updateRoundOptions(playerArray.length);
+    }
+    
+    updateRoundOptions(playerCount) {
+        // Only update if we're the room creator and game hasn't started
+        if (!this.isCreator || !this.roundsSetting) return;
+        
+        // Store current value
+        const currentValue = parseInt(this.roundsSetting.value);
+        
+        // Clear existing options
+        this.roundsSetting.innerHTML = '';
+        
+        // Generate round options that are multiples of player count
+        // This ensures everyone gets an equal number of turns to draw
+        const minRounds = Math.max(playerCount, 2); // At least 2 rounds minimum
+        const maxRounds = playerCount * 5; // Up to 5 turns per player
+        
+        const options = [];
+        for (let multiplier = 1; multiplier <= 5; multiplier++) {
+            const rounds = playerCount * multiplier;
+            if (rounds >= minRounds && rounds <= 30) { // Cap at 30 rounds max
+                options.push(rounds);
+            }
+        }
+        
+        // Add options to dropdown
+        let selectedValue = options[1] || options[0]; // Default to 2x player count, or first available
+        
+        options.forEach(rounds => {
+            const option = document.createElement('option');
+            option.value = rounds;
+            option.textContent = `${rounds} (${Math.floor(rounds/playerCount)} per player)`;
+            
+            // Try to maintain the current selection if it's still valid
+            if (rounds === currentValue) {
+                selectedValue = rounds;
+            }
+            
+            this.roundsSetting.appendChild(option);
+        });
+        
+        // Set the selected value
+        this.roundsSetting.value = selectedValue;
     }
 
     updateRound(round) {
