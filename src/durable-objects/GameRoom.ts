@@ -568,24 +568,20 @@ export class GameRoomObject extends DurableObject {
     const roundData = this.currentRound;
     const shouldEndGame = this.currentRoundNumber >= this.maxRounds;
     
-    // Send round-end with word only to players who guessed correctly + drawer
+    // Send round-end with word revealed to everyone
+    const message = {
+      type: 'round-end',
+      data: {
+        word: roundData?.word || '???',
+        scores: Object.fromEntries(this.players),
+        revealed: true,
+        scoreUpdates: roundData?.scoreUpdates || []
+      },
+      timestamp: Date.now()
+    };
+    
     for (const [playerId, ws] of this.webSockets) {
       if (ws.readyState === WebSocket.READY_STATE_OPEN) {
-        const shouldRevealWord = !roundData || 
-          playerId === roundData.drawerId || 
-          roundData.guessedPlayers.has(playerId);
-          
-        const message = {
-          type: 'round-end',
-          data: {
-            word: shouldRevealWord ? roundData?.word : '???',
-            scores: Object.fromEntries(this.players),
-            revealed: shouldRevealWord,
-            scoreUpdates: roundData?.scoreUpdates || []
-          },
-          timestamp: Date.now()
-        };
-        
         ws.send(JSON.stringify(message));
       }
     }

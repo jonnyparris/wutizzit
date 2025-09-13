@@ -9,6 +9,7 @@ class GameClient {
         this.ctx = null;
         this.audioContext = null;
         this.isRoomCreator = false;
+        this.currentDrawerId = null;
         
         this.init();
     }
@@ -635,10 +636,18 @@ class GameClient {
             .forEach(player => {
                 const isLeader = player.score === maxScore && maxScore > 0;
                 const isCurrentPlayer = player.id === this.playerId;
+                const isCurrentDrawer = player.id === this.currentDrawerId;
                 const playerDiv = document.createElement('div');
-                playerDiv.className = `flex justify-between items-center p-3 player-card ${
-                    isCurrentPlayer ? 'ring-2 ring-blue-400 bg-blue-50 border-2 border-blue-300' : ''
-                }`;
+                
+                // Determine styling based on player state
+                let className = 'flex justify-between items-center p-3 player-card ';
+                if (isCurrentDrawer) {
+                    className += 'ring-2 ring-green-400 bg-green-50 border-2 border-green-300';
+                } else if (isCurrentPlayer) {
+                    className += 'ring-2 ring-blue-400 bg-blue-50 border-2 border-blue-300';
+                }
+                playerDiv.className = className;
+                
                 const avatar = this.generatePlayerAvatar(player.id);
                 
                 // Show ban button for room creator (but not for themselves)
@@ -647,12 +656,12 @@ class GameClient {
                 playerDiv.innerHTML = `
                     <div class="flex items-center gap-2">
                         <span class="text-lg">${avatar}</span>
-                        <span class="font-medium ${isCurrentPlayer ? 'text-blue-700 font-bold' : ''}">
-                            ${isCurrentPlayer ? '👤 ' : ''}${isLeader ? '👑 ' : ''}${player.username}${isCurrentPlayer ? ' (You)' : ''}
+                        <span class="font-medium ${isCurrentPlayer ? 'text-blue-700 font-bold' : isCurrentDrawer ? 'text-green-700 font-bold' : ''}">
+                            ${isCurrentPlayer ? '👤 ' : ''}${isCurrentDrawer ? '🎨 ' : ''}${isLeader ? '👑 ' : ''}${player.username}${isCurrentPlayer ? ' (You)' : ''}${isCurrentDrawer ? ' (Drawing)' : ''}
                         </span>
                     </div>
                     <div class="flex items-center gap-2">
-                        <span class="text-sm font-bold ${isCurrentPlayer ? 'text-blue-700' : ''}">${player.score}</span>
+                        <span class="text-sm font-bold ${isCurrentPlayer ? 'text-blue-700' : isCurrentDrawer ? 'text-green-700' : ''}">${player.score}</span>
                         ${canBan ? `<button class="ban-player-btn text-xs px-2 py-1 bg-red-500 text-white rounded hover:bg-red-600" data-player-id="${player.id}">🚫</button>` : ''}
                     </div>
                 `;
@@ -780,6 +789,7 @@ class GameClient {
     handleRoundStart(data) {
         this.clearCanvas();
         this.isDrawer = data.drawerId === this.playerId;
+        this.currentDrawerId = data.drawerId;
         this.playSoundEffect('game-start');
         
         // Update max rounds if provided by server
@@ -821,6 +831,11 @@ class GameClient {
             timestamp: Date.now(),
             isGuess: false
         });
+        
+        // Update player list to highlight the current drawer
+        if (this.playersData) {
+            this.updatePlayersList(this.playersData);
+        }
     }
 
     handleDrawerWord(data) {
@@ -861,6 +876,9 @@ class GameClient {
             isGuess: false
         });
         this.playSoundEffect('round-end');
+        
+        // Clear drawer highlighting when round ends
+        this.currentDrawerId = null;
         
         // Update scores with final data
         if (data.scores) {
@@ -1671,6 +1689,19 @@ class GameClient {
         if (data.reason === 'Only one player remaining') {
             statusMessage = `🚪 Game ended - only one player remaining`;
             chatMessage = `🚪 Game ended because only one player remained. ${data.winner.username} wins by default!`;
+            
+            // For single player remaining, return to homepage after a brief delay
+            this.gameStatus.textContent = statusMessage;
+            this.addChatMessage({
+                username: 'System',
+                message: chatMessage,
+                timestamp: Date.now()
+            });
+            
+            setTimeout(() => {
+                this.showHomeScreen();
+            }, 3000); // Return to homepage after 3 seconds
+            return;
         }
         
         this.gameStatus.textContent = statusMessage;
@@ -1682,7 +1713,7 @@ class GameClient {
             timestamp: Date.now()
         });
 
-        // Show winner celebration modal
+        // Show winner celebration modal for normal game end
         setTimeout(() => {
             this.showWinnerModal(data.finalScores);
         }, 1000);
@@ -1701,6 +1732,7 @@ class GameClient {
         this.playerId = null;
         this.roomId = null;
         this.isDrawer = false;
+        this.currentDrawerId = null;
         this.startStatsRefreshTimer(); // Resume refreshing stats when back on homepage
         this.updateHomePageStats(); // Immediate update when returning to homepage
     }

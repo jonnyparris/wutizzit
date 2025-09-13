@@ -1,10 +1,10 @@
 ## These things need fixing
 
-- [] game stats on the homepage are not updating when there are games in progress
-- [] game pause doesn't pause the game timer
-- [] when there's only one player left in room then game should end and return to homepage
-- [] the word should be revealed to everyone when the round is over
-- [] the current player drawing should be highlighted in the player list
+- [x] game stats on the homepage are not updating when there are games in progress
+- [x] game pause doesn't pause the game timer
+- [x] when there's only one player left in room then game should end and return to homepage
+- [x] the word should be revealed to everyone when the round is over
+- [x] the current player drawing should be highlighted in the player list
 - [] the character count total is always zero
 - [] player list does not update when a player leaves the game
 - [] when a player guesses incorrectly the chat message to everyone else says that they guessed correctly
