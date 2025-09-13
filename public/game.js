@@ -233,7 +233,13 @@ class GameClient {
         const adjectives = [
             'Sneaky', 'Mighty', 'Swift', 'Brave', 'Clever', 'Cosmic', 'Magic', 'Royal',
             'Silent', 'Golden', 'Silver', 'Wild', 'Dancing', 'Singing', 'Flying', 'Wise',
-            'Ancient', 'Mysterious', 'Legendary', 'Epic', 'Daring', 'Fearless', 'Noble'
+            'Ancient', 'Mysterious', 'Legendary', 'Epic', 'Daring', 'Fearless', 'Noble',
+            // More cheeky/funny adjectives
+            'Giggling', 'Wobbly', 'Dizzy', 'Bouncy', 'Funky', 'Quirky', 'Wacky', 'Silly',
+            'Sparkly', 'Fluffy', 'Bubbly', 'Sassy', 'Cheeky', 'Grumpy', 'Sleepy', 'Happy',
+            'Snappy', 'Perky', 'Zippy', 'Peppy', 'Jolly', 'Merry', 'Cheerful', 'Spunky',
+            'Zesty', 'Fizzy', 'Crispy', 'Crusty', 'Mushy', 'Squishy', 'Slippery', 'Sticky',
+            'Jiggly', 'Wiggly', 'Wrinkly', 'Lumpy', 'Bumpy', 'Jumpy', 'Loopy', 'Goofy'
         ];
         
         const celebrities = [
@@ -248,7 +254,16 @@ class GameClient {
             'Garfield', 'Snoopy', 'Charlie', 'Homer', 'Bart', 'Lisa', 'Marge',
             // Mythological
             'Zeus', 'Athena', 'Apollo', 'Artemis', 'Hercules', 'Perseus', 'Achilles',
-            'Odin', 'Thor', 'Loki', 'Freya', 'Merlin', 'Arthur', 'Excalibur'
+            'Odin', 'Thor', 'Loki', 'Freya', 'Merlin', 'Arthur', 'Excalibur',
+            // More cheeky/fun characters
+            'Spongebob', 'Patrick', 'Squidward', 'Krabs', 'Plankton', 'Sandy',
+            'Waldo', 'Grinch', 'Cookie', 'Monster', 'Elmo', 'Big', 'Bird', 'Oscar',
+            'Kermit', 'Piggy', 'Gonzo', 'Fozzie', 'Animal', 'Swedish', 'Chef',
+            'Scooby', 'Shaggy', 'Velma', 'Daphne', 'Fred', 'Scrappy',
+            'Pink', 'Panther', 'Inspector', 'Gadget', 'Penny', 'Brain',
+            'Tom', 'Jerry', 'Tweety', 'Sylvester', 'Bugs', 'Bunny', 'Daffy',
+            'Porky', 'Pepe', 'Speedy', 'Foghorn', 'Leghorn', 'Yosemite', 'Sam',
+            'Road', 'Runner', 'Coyote', 'Pepsi', 'Cola', 'Taco', 'Bell'
         ];
         
         const adjective = adjectives[Math.floor(Math.random() * adjectives.length)];
