@@ -26,8 +26,8 @@ A real-time multiplayer drawing and guessing game built with Cloudflare Workers,
 - **Room Management**: Ban disruptive players, transfer ownership automatically
 
 ### Enhanced Experience
-- **Winner Celebration**: Beautiful modal with podium and random celebration GIFs
-- **Lobby Backgrounds**: Random Unsplash images while waiting for games to start
+- **Results screen**: Podium for the top 3 plus the rest of the table
+- **Clean, responsive UI**: Inline SVG icons, initials avatars, a timer ring and letter-slot hints
 - **Sound Effects**: Audio feedback for correct guesses, timer warnings, and game events
 - **No Word Repetition**: Words won't repeat during the same game
 - **Responsive Design**: Works on desktop and mobile devices
@@ -64,6 +64,7 @@ A real-time multiplayer drawing and guessing game built with Cloudflare Workers,
 npm install
 npm run dev        # wrangler dev (builds Tailwind first). Run `npm run dev:css` alongside to watch CSS.
 npm test           # Vitest inside the Workers runtime (@cloudflare/vitest-plugin)
+BASE_URL=http://localhost:8787 npm run test:e2e   # Browser e2e (needs `npm run dev` and `npx playwright install chromium`, or set CHROMIUM_PATH)
 npm run typecheck
 npm run deploy     # builds CSS, then wrangler deploy
 ```

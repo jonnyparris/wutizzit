@@ -3,239 +3,254 @@
 	<head>
 		<meta charset="UTF-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-		<title>Wutizzit – Draw, Guess, Win!</title>
-		<meta name="description" content="A free real-time multiplayer drawing and guessing game. Create a room, share the link, and start doodling." />
-		<meta name="theme-color" content="#667eea" />
-		<meta property="og:title" content="Wutizzit – Draw, Guess, Win!" />
+		<title>Wutizzit · Draw it. Guess it.</title>
+		<meta name="description" content="A free real-time multiplayer drawing and guessing game. Create a room, share the link, and start drawing." />
+		<meta name="theme-color" content="#f7f6f3" />
+		<meta property="og:title" content="Wutizzit · Draw it. Guess it." />
 		<meta property="og:description" content="Real-time multiplayer drawing and guessing. Create a room and share the link." />
 		<meta property="og:type" content="website" />
-		<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🎨</text></svg>" />
+		<link rel="icon" href="/favicon.svg" type="image/svg+xml" />
 		<link rel="preconnect" href="https://fonts.googleapis.com" />
 		<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-		<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+		<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
 		<link rel="stylesheet" href="/styles.css" />
 		<script src="/game.js" defer></script>
 	</head>
-	<body class="font-sans text-gray-800">
-		<header class="bg-white/95 shadow-sm border-b border-gray-200">
-			<div class="max-w-6xl mx-auto px-4 py-3 flex justify-between items-center">
-				<a href="/" class="flex items-center gap-2" id="home-link">
-					<span class="text-2xl" aria-hidden="true">🎨</span>
-					<span class="text-2xl font-bold text-gray-800">Wutizzit</span>
-					<span class="text-sm text-gray-500 hidden sm:inline">· The Drawing Game</span>
+	<body>
+		<!-- Icons adapted from Lucide (ISC licence, lucide.dev). -->
+		<svg width="0" height="0" class="absolute" aria-hidden="true">
+			<defs>
+				<symbol id="i-volume" viewBox="0 0 24 24"><path d="M11 5 6 9H2v6h4l5 4V5Z" /><path d="M15.5 8.5a5 5 0 0 1 0 7" /><path d="M19 5a10 10 0 0 1 0 14" /></symbol>
+				<symbol id="i-volume-off" viewBox="0 0 24 24"><path d="M11 5 6 9H2v6h4l5 4V5Z" /><path d="m22 9-6 6M16 9l6 6" /></symbol>
+				<symbol id="i-link" viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" /><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" /></symbol>
+				<symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5" /></symbol>
+				<symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12" /></symbol>
+				<symbol id="i-pencil" viewBox="0 0 24 24"><path d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" /></symbol>
+				<symbol id="i-crown" viewBox="0 0 24 24"><path d="m2 7 4.5 4L12 4l5.5 7L22 7l-2 12H4Z" /></symbol>
+				<symbol id="i-bucket" viewBox="0 0 24 24"><path d="m19 11-8-8-8.6 8.6a2 2 0 0 0 0 2.8l5.2 5.2c.8.8 2 .8 2.8 0Z" /><path d="m5 2 5 5M2 13h15" /><path d="M22 20a2 2 0 1 1-4 0c0-1.6 1.7-2.4 2-4 .3 1.6 2 2.4 2 4Z" /></symbol>
+				<symbol id="i-undo" viewBox="0 0 24 24"><path d="M3 7v6h6" /><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13" /></symbol>
+				<symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6" /></symbol>
+				<symbol id="i-pause" viewBox="0 0 24 24"><rect x="6" y="4" width="4" height="16" rx="1" /><rect x="14" y="4" width="4" height="16" rx="1" /></symbol>
+				<symbol id="i-play" viewBox="0 0 24 24"><path d="M6 4l14 8-14 8Z" /></symbol>
+				<symbol id="i-logout" viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" /><path d="m16 17 5-5-5-5M21 12H9" /></symbol>
+				<symbol id="i-shuffle" viewBox="0 0 24 24"><path d="M2 18h1.4c1.3 0 2.5-.6 3.3-1.7l6.1-8.6c.7-1.1 2-1.7 3.3-1.7H22" /><path d="m18 2 4 4-4 4M2 6h1.9c1.5 0 2.9.9 3.6 2.2M22 18h-5.9c-1.3 0-2.6-.7-3.3-1.8l-.5-.8M18 14l4 4-4 4" /></symbol>
+				<symbol id="i-send" viewBox="0 0 24 24"><path d="m22 2-7 20-4-9-9-4Z" /><path d="M22 2 11 13" /></symbol>
+				<symbol id="i-list" viewBox="0 0 24 24"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" /></symbol>
+				<symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7" /></symbol>
+				<symbol id="i-trophy" viewBox="0 0 24 24"><path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6M18 9h1.5a2.5 2.5 0 0 0 0-5H18M4 22h16M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22M18 2H6v7a6 6 0 0 0 12 0V2Z" /></symbol>
+				<symbol id="i-replay" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" /><path d="M3 3v5h5" /></symbol>
+				<symbol id="i-lock" viewBox="0 0 24 24"><rect x="4" y="11" width="16" height="10" rx="2" /><path d="M8 11V7a4 4 0 0 1 8 0v4" /></symbol>
+				<symbol id="i-brush" viewBox="0 0 24 24"><path d="m9.06 11.9 8.07-8.06a2.85 2.85 0 1 1 4.03 4.03l-8.06 8.08" /><path d="M7.07 14.94c-1.66 0-3 1.35-3 3.02 0 1.33-2.5 1.52-2 2.02 1.08 1.1 2.49 2.02 4 2.02 2.2 0 4-1.8 4-4.04a3.01 3.01 0 0 0-3-3.02Z" /></symbol>
+			</defs>
+		</svg>
+
+		<header class="site-header">
+			<div class="mx-auto max-w-6xl px-4 h-16 flex items-center justify-between">
+				<a href="/" id="home-link" class="flex items-center gap-2.5" aria-label="Wutizzit home">
+					<span class="logo-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 15c2-5 4-7 6-4s3 5 5 1 3-5 5-3" /></svg></span>
+					<span class="text-lg font-extrabold tracking-tight">wutizzit</span>
 				</a>
-				<div class="flex items-center gap-3">
-					<span id="connection-status" class="text-xs font-medium hidden" role="status"></span>
-					<button id="mute-btn" class="text-xl px-2 py-1 rounded hover:bg-gray-100" aria-pressed="false" aria-label="Mute sounds" title="Toggle sound">🔊</button>
+				<div class="flex items-center gap-2">
+					<span id="connection-status" class="status-pill hidden" role="status"></span>
+					<button id="mute-btn" class="icon-btn" aria-pressed="false" aria-label="Mute sounds" title="Sound"><svg class="icon"><use href="#i-volume" /></svg></button>
 				</div>
 			</div>
 		</header>
 
-		<main id="app" class="container mx-auto px-3 sm:px-4 py-6 sm:py-8">
-			<!-- Home Screen -->
-			<section id="home-screen" class="max-w-md mx-auto game-card p-6 sm:p-8" aria-labelledby="home-title">
-				<h1 id="home-title" class="text-4xl font-bold text-center mb-6 title-text">Wutizzit</h1>
+		<main class="mx-auto max-w-6xl px-4 py-6 sm:py-10">
+			<!-- Home -->
+			<section id="home-screen" class="grid gap-8 lg:grid-cols-[1.1fr_1fr] lg:grid-rows-[auto_1fr] lg:gap-x-14 lg:gap-y-0 items-start" aria-labelledby="home-title">
+				<div class="lg:pt-8">
+					<p class="eyebrow">Multiplayer drawing game</p>
+					<h1 id="home-title" class="mt-3 text-4xl sm:text-6xl font-extrabold tracking-tight leading-[1.02]">Draw it.<br /><span class="text-gradient">Guess it.</span></h1>
+					<p class="mt-4 sm:mt-5 sm:text-lg text-muted max-w-md">One person draws, everyone else races to guess the word. Create a room, send the link, and play in your browser. No sign-up.</p>
+				</div>
 
-				<div id="invite-banner" class="hidden mb-4 p-3 rounded-lg bg-yellow-50 border border-yellow-200 text-sm text-yellow-900" role="status"></div>
-				<div id="home-error" class="hidden mb-4 p-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-800" role="alert"></div>
+				<div class="card p-6 sm:p-8 lg:col-start-2 lg:row-start-1 lg:row-span-2">
+					<div id="invite-banner" class="banner banner-info hidden" role="status"></div>
+					<div id="home-error" class="banner banner-error hidden" role="alert"></div>
 
-				<div class="text-center mb-6 p-4 bg-purple-50 rounded-lg">
-					<div class="grid grid-cols-2 gap-4 text-sm">
+					<form id="join-form" class="space-y-5" autocomplete="off">
 						<div>
-							<div class="font-bold text-purple-600 text-lg" id="active-games">–</div>
-							<div class="text-purple-500">Active games</div>
+							<label for="username-input" class="field-label">Your name</label>
+							<div class="flex gap-2">
+								<input type="text" id="username-input" class="input flex-1 min-w-0" maxlength="20" required autocapitalize="words" spellcheck="false" />
+								<button type="button" id="shuffle-name-btn" class="btn btn-secondary px-3" title="Random name" aria-label="Pick a random name"><svg class="icon"><use href="#i-shuffle" /></svg></button>
+							</div>
 						</div>
-						<div>
-							<div class="font-bold text-purple-600 text-lg" id="total-players">–</div>
-							<div class="text-purple-500">Players online</div>
+						<button type="button" id="create-room-btn" class="btn btn-primary w-full h-12 text-base">Create a room</button>
+						<div class="divider"><span>or join with a code</span></div>
+						<div class="flex gap-2">
+							<label for="room-input" class="sr-only">Room code</label>
+							<input type="text" id="room-input" placeholder="ABC123" class="input flex-1 min-w-0 font-mono uppercase tracking-[0.3em]" maxlength="6" pattern="[A-Za-z0-9]{6}" autocapitalize="characters" spellcheck="false" />
+							<button type="submit" id="join-room-btn" class="btn btn-secondary px-5">Join</button>
 						</div>
+					</form>
+
+					<div id="active-games-list" class="mt-8 hidden">
+						<h2 class="field-label">Open rooms</h2>
+						<ul id="games-container" class="divide-y divide-line border border-line rounded-xl overflow-hidden"></ul>
 					</div>
 				</div>
 
-				<form id="join-form" class="space-y-4" autocomplete="off">
-					<div>
-						<label for="username-input" class="block text-sm font-medium text-gray-700 mb-1">Your name</label>
-						<div class="flex gap-2">
-							<input type="text" id="username-input" class="flex-1 min-w-0 px-4 py-3 fun-input" maxlength="20" required autocapitalize="words" spellcheck="false" />
-							<button type="button" id="shuffle-name-btn" class="px-3 rounded-lg bg-white border-2 border-coral text-xl hover:bg-red-50" title="Random name" aria-label="Pick a random name">🎲</button>
-						</div>
-					</div>
-					<div>
-						<label for="room-input" class="block text-sm font-medium text-gray-700 mb-1">Room code</label>
-						<div class="flex gap-2">
-							<input type="text" id="room-input" placeholder="ABC123" class="flex-1 min-w-0 px-4 py-3 fun-input uppercase tracking-widest font-mono" maxlength="6" pattern="[A-Za-z0-9]{6}" autocapitalize="characters" spellcheck="false" />
-							<button type="submit" id="join-room-btn" class="px-6 py-3 fun-button rounded-lg">Join</button>
-						</div>
-					</div>
-					<div class="relative text-center text-xs text-gray-400"><span class="bg-white px-2">or</span></div>
-					<button type="button" id="create-room-btn" class="w-full px-4 py-3 fun-button rounded-lg">✨ Create new room</button>
-				</form>
-
-				<div id="active-games-list" class="mt-6 hidden">
-					<h2 class="font-bold text-sm mb-3 text-gray-700">🎮 Join a game in progress</h2>
-					<ul id="games-container" class="space-y-2"></ul>
+				<div class="lg:pt-8">
+					<dl class="flex gap-8">
+						<div><dt class="stat-label">Live games</dt><dd class="stat-value" id="active-games">–</dd></div>
+						<div><dt class="stat-label">Players online</dt><dd class="stat-value" id="total-players">–</dd></div>
+					</dl>
+					<ol class="mt-8 grid gap-4 sm:grid-cols-3 text-sm">
+						<li class="step"><span class="step-num">1</span>Create a room and share the link</li>
+						<li class="step"><span class="step-num">2</span>Take turns drawing a secret word</li>
+						<li class="step"><span class="step-num">3</span>Guess fast to score the most points</li>
+					</ol>
 				</div>
 			</section>
 
-			<!-- Game Screen -->
+			<!-- Game -->
 			<section id="game-screen" class="hidden" aria-label="Game">
-				<div class="flex flex-col lg:flex-row gap-4 lg:gap-6">
-					<div class="flex-1 min-w-0">
-						<div class="game-card p-4 mb-4">
-							<div class="flex justify-between items-start gap-4">
-								<div class="min-w-0">
-									<div class="flex flex-wrap items-center gap-2 mb-1">
-										<h2 class="text-xl font-bold">Room <span id="room-id-display" class="font-mono tracking-widest"></span></h2>
-										<button id="copy-room-link" class="px-2 py-1 text-xs bg-blue-500 text-white rounded hover:bg-blue-600">📋 Share link</button>
-									</div>
-									<p id="game-status" class="text-gray-600" aria-live="polite">Connecting…</p>
+				<div class="grid gap-4 lg:grid-cols-[1fr_20rem] lg:gap-6 items-start">
+					<div class="min-w-0 space-y-4">
+						<div class="card px-4 py-3 sm:px-5 sm:py-4 flex items-center gap-4 sticky top-[4.5rem] z-20 lg:static">
+							<div class="min-w-0 flex-1">
+								<div class="flex items-center gap-2 flex-wrap">
+									<span class="text-xs font-medium text-muted uppercase tracking-wider">Room</span>
+									<span id="room-id-display" class="font-mono font-semibold tracking-[0.2em]"></span>
+									<button id="copy-room-link" class="btn btn-ghost btn-sm"><svg class="icon icon-sm"><use href="#i-link" /></svg><span>Invite</span></button>
 								</div>
-								<div class="text-right shrink-0">
-									<div id="timer" class="text-3xl font-bold text-red-600 tabular-nums" aria-live="off">–</div>
-									<div id="round-info" class="text-sm text-gray-600"></div>
-								</div>
+								<p id="game-status" class="mt-0.5 text-sm sm:text-base font-semibold leading-snug" aria-live="polite">Connecting…</p>
 							</div>
-
-							<!-- Owner controls -->
-							<div id="game-settings" class="mt-3 hidden">
-								<div class="flex flex-wrap gap-x-4 gap-y-2 items-center">
-									<label class="flex items-center gap-2 text-sm font-medium">Rounds
-										<select id="rounds-setting" class="px-2 py-1 border rounded bg-white"></select>
-									</label>
-									<label class="flex items-center gap-2 text-sm font-medium">Time
-										<select id="duration-setting" class="px-2 py-1 border rounded bg-white">
-											<option value="30">30s</option>
-											<option value="60" selected>60s</option>
-											<option value="90">90s</option>
-											<option value="120">2 min</option>
-											<option value="180">3 min</option>
-										</select>
-									</label>
-									<label class="flex items-center gap-2 text-sm font-medium">Word choices
-										<select id="word-choices-setting" class="px-2 py-1 border rounded bg-white">
-											<option value="2">2</option>
-											<option value="3" selected>3</option>
-											<option value="4">4</option>
-											<option value="5">5</option>
-										</select>
-									</label>
-									<button id="word-list-btn" class="px-3 py-1 bg-purple-500 text-white rounded hover:bg-purple-600 text-sm">📝 Custom words</button>
+							<div class="flex items-center gap-3 shrink-0">
+								<div class="text-right hidden sm:block">
+									<div id="round-info" class="text-sm font-medium text-muted tabular-nums"></div>
 								</div>
-							</div>
-							<div class="flex flex-wrap gap-2 mt-3">
-								<button id="start-game-btn" class="px-4 py-2 fun-button rounded-lg hidden">🚀 Start game</button>
-								<button id="pause-game-btn" class="px-4 py-2 bg-orange-500 text-white rounded hover:bg-orange-600 hidden">⏸️ Pause</button>
+								<div id="timer" class="timer" aria-live="off">
+									<svg viewBox="0 0 44 44" aria-hidden="true"><circle class="timer-track" cx="22" cy="22" r="19" /><circle id="timer-ring" class="timer-ring" cx="22" cy="22" r="19" /></svg>
+									<span id="timer-text">–</span>
+								</div>
 							</div>
 						</div>
 
-						<div class="bg-white rounded-lg shadow p-3 sm:p-4 mb-4">
-							<div id="word-bar" class="text-center mb-3 min-h-8">
-								<p id="word-display" class="text-lg font-semibold hidden">Your word: <span id="current-word" class="text-blue-600"></span></p>
-								<p id="word-hint" class="text-lg font-semibold hidden">
-									<span id="hint-text" class="font-mono tracking-[0.3em] text-gray-700"></span>
-									<span id="letter-count" class="text-sm text-gray-500 ml-2"></span>
-								</p>
-							</div>
-
-							<div id="drawing-tools" class="flex flex-wrap gap-3 mb-3 items-center hidden" role="toolbar" aria-label="Drawing tools">
-								<div id="color-picker-grid" class="grid grid-cols-6 sm:grid-cols-12 gap-1" role="group" aria-label="Colour"></div>
-								<label class="flex items-center gap-2 text-sm">Size
-									<input type="range" id="brush-size" min="2" max="40" value="4" class="w-24" />
+						<div id="owner-bar" class="card px-4 py-3 hidden">
+							<div class="flex flex-wrap items-end gap-3">
+								<label class="select-field">Rounds<select id="rounds-setting" class="select"></select></label>
+								<label class="select-field">Draw time
+									<select id="duration-setting" class="select">
+										<option value="30">30 sec</option>
+										<option value="60" selected>60 sec</option>
+										<option value="90">90 sec</option>
+										<option value="120">2 min</option>
+										<option value="180">3 min</option>
+									</select>
 								</label>
-								<button id="fill-tool" class="px-3 py-1 bg-green-500 text-white rounded hover:bg-green-600" aria-pressed="false">🪣 Fill</button>
-								<button id="undo-canvas" class="px-3 py-1 bg-yellow-500 text-white rounded hover:bg-yellow-600" disabled title="Undo (Ctrl+Z)">↶ Undo</button>
-								<button id="clear-canvas" class="px-3 py-1 bg-red-500 text-white rounded hover:bg-red-600">🗑️ Clear</button>
+								<label class="select-field">Word choices
+									<select id="word-choices-setting" class="select">
+										<option value="2">2</option>
+										<option value="3" selected>3</option>
+										<option value="4">4</option>
+										<option value="5">5</option>
+									</select>
+								</label>
+								<button id="word-list-btn" class="btn btn-secondary h-10"><svg class="icon icon-sm"><use href="#i-list" /></svg><span>Custom words</span></button>
+								<div class="flex-1"></div>
+								<button id="start-game-btn" class="btn btn-primary h-10 px-5"></button>
+							</div>
+						</div>
+
+						<div class="card p-3 sm:p-4">
+							<div id="word-bar" class="word-bar">
+								<div id="word-display" class="hidden text-center">
+									<div class="text-xs font-medium text-muted uppercase tracking-wider">Your word</div>
+									<div id="current-word" class="text-2xl font-bold tracking-tight"></div>
+								</div>
+								<div id="word-hint" class="hidden text-center">
+									<div id="hint-text" class="hint" aria-hidden="true"></div>
+									<div id="letter-count" class="mt-1 text-xs font-medium text-muted"></div>
+								</div>
 							</div>
 
-							<div class="canvas-container">
+							<div class="canvas-frame">
 								<canvas id="game-canvas" class="drawing-canvas disabled-canvas" aria-label="Drawing canvas"></canvas>
 								<div id="canvas-overlay" class="canvas-overlay hidden"></div>
+							</div>
+
+							<div id="drawing-tools" class="toolbar hidden" role="toolbar" aria-label="Drawing tools">
+								<div id="color-picker-grid" class="swatches" role="group" aria-label="Colour"></div>
+								<div class="toolbar-sep"></div>
+								<label class="flex items-center gap-2 text-sm text-muted">
+									<span class="sr-only">Brush size</span>
+									<span id="brush-preview" class="brush-preview" aria-hidden="true"></span>
+									<input type="range" id="brush-size" min="2" max="40" value="4" class="range w-24" aria-label="Brush size" />
+								</label>
+								<div class="toolbar-sep"></div>
+								<div class="segmented" role="group" aria-label="Tool">
+									<button id="brush-tool" aria-pressed="true" title="Brush (B)"><svg class="icon icon-sm"><use href="#i-brush" /></svg><span class="sr-only">Brush</span></button>
+									<button id="fill-tool" aria-pressed="false" title="Fill (F)"><svg class="icon icon-sm"><use href="#i-bucket" /></svg><span class="sr-only">Fill</span></button>
+								</div>
+								<div class="flex-1"></div>
+								<button id="undo-canvas" class="icon-btn" disabled title="Undo (Ctrl+Z)" aria-label="Undo"><svg class="icon"><use href="#i-undo" /></svg></button>
+								<button id="clear-canvas" class="icon-btn" title="Clear canvas" aria-label="Clear canvas"><svg class="icon"><use href="#i-trash" /></svg></button>
 							</div>
 						</div>
 					</div>
 
-					<aside class="w-full lg:w-80 flex flex-col gap-4 lg:self-start lg:sticky lg:top-4">
+					<aside class="flex flex-col gap-4 lg:sticky lg:top-6">
 						<!-- On phones the chat sits right under the canvas so guessing doesn't need scrolling. -->
-						<div class="bg-white rounded-lg shadow p-4 order-2 lg:order-1">
-							<h3 class="font-bold text-lg mb-3">Players <span id="player-count" class="text-sm font-normal text-gray-500"></span></h3>
-							<ul id="players-list" class="space-y-2"></ul>
-						</div>
-
-						<div class="bg-white rounded-lg shadow p-4 order-1 lg:order-2">
-							<h3 class="font-bold text-lg mb-3">Chat</h3>
-							<div id="chat-messages" class="h-56 lg:h-72 overflow-y-auto border border-gray-200 rounded p-2 mb-3 space-y-1 text-sm" role="log" aria-live="polite"></div>
-							<form id="chat-form" class="flex gap-2" autocomplete="off">
-								<input type="text" id="chat-input" placeholder="Type your guess…" class="flex-1 min-w-0 px-3 py-2 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500" maxlength="100" enterkeyhint="send" aria-label="Chat or guess" />
-								<button type="submit" id="send-chat" class="px-3 py-2 bg-blue-600 text-white rounded hover:bg-blue-700" aria-label="Send">📤</button>
+						<div class="card order-1 lg:order-2 flex flex-col">
+							<div class="panel-head">Chat</div>
+							<div id="chat-messages" class="chat" role="log" aria-live="polite"></div>
+							<form id="chat-form" class="p-3 border-t border-line flex gap-2" autocomplete="off">
+								<input type="text" id="chat-input" placeholder="Type your guess…" class="input flex-1 min-w-0 h-10" maxlength="100" enterkeyhint="send" aria-label="Chat or guess" />
+								<button type="submit" id="send-chat" class="btn btn-primary w-10 h-10 p-0" aria-label="Send"><svg class="icon icon-sm"><use href="#i-send" /></svg></button>
 							</form>
 						</div>
 
-						<button id="leave-room-btn" class="order-3 w-full px-6 py-2 bg-red-600 text-white rounded hover:bg-red-700">Leave room</button>
+						<div class="card order-2 lg:order-1">
+							<div class="panel-head">Players <span id="player-count" class="text-muted font-medium"></span></div>
+							<ul id="players-list" class="p-2"></ul>
+						</div>
+
+						<div class="order-3 flex gap-2">
+							<button id="pause-game-btn" class="btn btn-secondary flex-1 hidden"></button>
+							<button id="leave-room-btn" class="btn btn-ghost flex-1 text-danger"><svg class="icon icon-sm"><use href="#i-logout" /></svg><span>Leave room</span></button>
+						</div>
 					</aside>
 				</div>
 			</section>
 		</main>
 
+		<footer class="mx-auto max-w-6xl px-4 pb-10 pt-4 text-sm text-muted flex flex-wrap gap-x-6 gap-y-2 justify-between">
+			<span>Wutizzit, a drawing and guessing game.</span>
+			<span>Runs on Cloudflare Workers and Durable Objects.</span>
+		</footer>
+
 		<!-- Custom word list -->
-		<dialog id="word-list-modal" class="m-auto rounded-lg p-6 max-w-md w-[calc(100%-2rem)] backdrop:bg-black/50">
-			<form method="dialog">
-				<h3 class="text-xl font-bold mb-2">📝 Custom word list</h3>
-				<p class="text-sm text-gray-600 mb-3">Separate words with commas or new lines. At least 5 words. Leave empty for the built-in list.</p>
-				<textarea id="custom-words" rows="8" class="w-full p-3 border border-gray-300 rounded-lg resize-y" placeholder="cat, dog, house, tree, rainbow…"></textarea>
-				<p id="custom-words-count" class="text-xs text-gray-500 mt-1"></p>
-				<div class="flex gap-2 mt-4 justify-end">
-					<button value="cancel" class="px-4 py-2 bg-gray-500 text-white rounded hover:bg-gray-600">Cancel</button>
-					<button value="save" id="save-words-btn" class="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600">Save</button>
+		<dialog id="word-list-modal" class="modal">
+			<form method="dialog" class="p-6">
+				<h3 class="text-lg font-bold">Custom words</h3>
+				<p class="mt-1 text-sm text-muted">Separate words with commas or new lines. Use at least 5, or leave it empty for the built-in list.</p>
+				<textarea id="custom-words" rows="8" class="input mt-4 w-full py-3 resize-y" placeholder="cat, dog, house, tree, rainbow…"></textarea>
+				<p id="custom-words-count" class="mt-2 text-xs text-muted"></p>
+				<div class="mt-5 flex gap-2 justify-end">
+					<button value="cancel" class="btn btn-secondary">Cancel</button>
+					<button value="save" id="save-words-btn" class="btn btn-primary">Save words</button>
 				</div>
 			</form>
 		</dialog>
 
-		<!-- Winner celebration -->
-		<dialog id="winner-modal" class="m-auto rounded-lg shadow-xl max-w-2xl w-[calc(100%-2rem)] p-6 sm:p-8 text-center backdrop:bg-black/75">
-			<h2 id="winner-title" class="text-3xl sm:text-4xl font-bold text-yellow-500 mb-4">🎉 Game complete! 🎉</h2>
-			<img id="celebration-gif" alt="" class="mx-auto mb-6 max-h-48 rounded-lg hidden" referrerpolicy="no-referrer" />
-			<div class="flex justify-center items-end gap-2 sm:gap-4 mb-8">
-				<div id="podium-2" class="text-center w-1/3 max-w-36">
-					<div class="bg-gray-300 rounded-t-lg px-2 py-5"><div class="text-2xl mb-1">🥈</div><div class="font-bold text-sm truncate podium-name">–</div><div class="text-sm podium-score"></div></div>
-					<div class="bg-gray-400 h-14 rounded-b-lg flex items-center justify-center text-white font-bold">2nd</div>
+		<!-- Results -->
+		<dialog id="winner-modal" class="modal modal-wide">
+			<div class="p-6 sm:p-8 text-center">
+				<div class="mx-auto w-12 h-12 rounded-full bg-accent-soft text-accent grid place-items-center"><svg class="icon"><use href="#i-trophy" /></svg></div>
+				<h2 id="winner-title" class="mt-4 text-2xl sm:text-3xl font-extrabold tracking-tight">Game complete</h2>
+				<p id="winner-subtitle" class="mt-1 text-muted"></p>
+				<div class="podium mt-8">
+					<div id="podium-2" class="podium-slot"><div class="podium-avatar"></div><div class="podium-name"></div><div class="podium-score"></div><div class="podium-bar h-16">2</div></div>
+					<div id="podium-1" class="podium-slot first"><div class="podium-avatar"></div><div class="podium-name"></div><div class="podium-score"></div><div class="podium-bar h-24">1</div></div>
+					<div id="podium-3" class="podium-slot"><div class="podium-avatar"></div><div class="podium-name"></div><div class="podium-score"></div><div class="podium-bar h-10">3</div></div>
 				</div>
-				<div id="podium-1" class="text-center w-1/3 max-w-40">
-					<div class="bg-yellow-300 rounded-t-lg px-2 py-7"><div class="text-3xl mb-1">🏆</div><div class="font-bold text-lg truncate podium-name">–</div><div class="text-lg podium-score"></div></div>
-					<div class="bg-yellow-500 h-20 rounded-b-lg flex items-center justify-center text-white font-bold text-lg">1st</div>
-				</div>
-				<div id="podium-3" class="text-center w-1/3 max-w-36">
-					<div class="bg-orange-300 rounded-t-lg px-2 py-3"><div class="text-xl mb-1">🥉</div><div class="font-bold text-sm truncate podium-name">–</div><div class="text-sm podium-score"></div></div>
-					<div class="bg-orange-500 h-10 rounded-b-lg flex items-center justify-center text-white font-bold">3rd</div>
-				</div>
+				<ol id="results-rest" class="mt-6 text-sm text-left max-w-xs mx-auto space-y-1"></ol>
+				<form method="dialog" class="mt-8"><button class="btn btn-primary h-11 px-6" autofocus>Back to the room</button></form>
 			</div>
-			<form method="dialog"><button class="px-6 py-3 bg-blue-500 text-white rounded-lg hover:bg-blue-600 text-lg" autofocus>🎨 Back to the room</button></form>
 		</dialog>
-
-		<footer class="bg-white/95 border-t border-gray-200 mt-12">
-			<div class="max-w-6xl mx-auto px-4 py-8 grid grid-cols-1 md:grid-cols-3 gap-8 text-sm text-gray-600">
-				<div>
-					<h3 class="font-semibold text-gray-800 mb-3">How to play</h3>
-					<ul class="space-y-1">
-						<li>🎨 Create a room and share the link</li>
-						<li>✏️ Draw your word when it's your turn</li>
-						<li>🤔 Guess other players' drawings in the chat</li>
-						<li>🏆 Faster guesses score more points</li>
-					</ul>
-				</div>
-				<div>
-					<h3 class="font-semibold text-gray-800 mb-3">Features</h3>
-					<ul class="space-y-1">
-						<li>⚡ Real-time multiplayer on Cloudflare's network</li>
-						<li>🔁 Rejoin after a refresh without losing your score</li>
-						<li>💡 Letter hints and "so close!" feedback</li>
-						<li>🎯 Custom word lists, pause and owner controls</li>
-					</ul>
-				</div>
-				<div>
-					<h3 class="font-semibold text-gray-800 mb-3">About</h3>
-					<p>Wutizzit is a drawing and guessing game for friends and family. Made with ❤️ for creative minds.</p>
-				</div>
-			</div>
-		</footer>
 	</body>
 </html>
