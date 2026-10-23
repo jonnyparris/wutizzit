@@ -105,14 +105,7 @@ function createServer({ env, ip, origin }: Ctx) {
 		async ({ session: ses0, wait_seconds, since_version }) => {
 			const ses = parseSession(ses0);
 			if (!ses) return fail('Invalid session.');
-			const stub = room(ses.roomId);
-			let since = since_version;
-			if (wait_seconds && since === undefined) {
-				const now = await stub.agentView(ses.token);
-				if ('error' in now) return fail(now.error);
-				since = now.version;
-			}
-			const view = await stub.agentView(ses.token, { since, waitMs: (wait_seconds ?? 0) * 1000 });
+			const view = await room(ses.roomId).agentView(ses.token, { since: since_version, waitMs: (wait_seconds ?? 0) * 1000 });
 			return 'error' in view ? fail(view.error) : text(withLink(view));
 		},
 	);

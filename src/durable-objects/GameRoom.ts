@@ -22,7 +22,7 @@ import {
 import { generateId, generateToken, pickRandom } from '../utils/id';
 import { pickWords, WORDS } from '../utils/words';
 import { opsToPngBase64, visibleOps } from '../game/raster';
-import { cleanShapes, shapesToOps } from '../game/shapes';
+import { cleanShapes, shapesToOps, type Shape } from '../game/shapes';
 import { BOT_MODELS, createBrain, DEFAULT_BOT_MODEL, findModel, type Brain, type BotModel } from '../bots/brain';
 
 // ---------------------------------------------------------------------------
@@ -52,6 +52,10 @@ const BOT_MAX_GUESSES = 8;
 const BOT_FIRST_LOOK_MS = [5_000, 8_000] as const;
 const BOT_GUESS_EVERY_MS = [7_000, 11_000] as const;
 const BOT_CHOOSE_MS = 1_500;
+/** Per-room daily AI calls, on top of the global budget in GlobalStats, so one room can't drain it. */
+const ROOM_AI_FREE_CALLS = 600;
+const ROOM_AI_PAID_CALLS = 150;
+const utcDay = () => new Date().toISOString().slice(0, 10);
 /** Shape drawings are replayed over roughly this long so everyone watches them appear. */
 const REPLAY_TARGET_MS = 14_000;
 const REPLAY_TICK_MS = 40;
@@ -101,7 +105,8 @@ interface BotRec {
 	guesses: number;
 	planned: boolean;
 	tried: string[];
-	outOfBudget: boolean;
+	/** UTC day the bot last ran out of AI budget, so it says so once and retries after the reset. */
+	outOfBudget: string | false;
 }
 
 interface ScoreUpdate {
@@ -148,6 +153,10 @@ interface RoomState {
 	order: string[];
 	/** Remaining drawers in the current rotation. */
 	drawQueue: string[];
+	/** Team games: how often each player has drawn, which team drew last, and banked team points. */
+	teamTurns?: { last: 'A' | 'B' | null; draws: Record<string, number>; points: { A: number; B: number } };
+	/** AI calls this room made today. */
+	aiSpend?: { day: string; free: number; paid: number };
 	/** ipHash → ban expiry. */
 	bans: Record<string, number>;
 	round: RoundRec | null;
@@ -226,6 +235,9 @@ export class GameRoomObject extends DurableObject<Env> {
 	brain: Brain;
 	/** Bots waiting on a model call (shown as "Thinking"). */
 	private botBusy = new Set<string>();
+	/** Bumped on every canvas change, to key the PNG cache shared by bots and view_canvas. */
+	private opsRev = 0;
+	private pngCache = new Map<number, { rev: number; png: Promise<string> }>();
 	/** Agents long-polling for a change. */
 	private waiters: (() => void)[] = [];
 	/** Private notices for agents (they have no socket), returned with their next call. */
@@ -382,8 +394,10 @@ export class GameRoomObject extends DurableObject<Env> {
 	async agentView(token: string, opts: { since?: number; waitMs?: number } = {}): Promise<AgentView | { error: string }> {
 		let p = this.agentByToken(token);
 		if (!p) return { error: 'Session expired or room closed. Join again.' };
-		const since = opts.since;
 		const wait = Math.max(0, Math.min(AGENT_WAIT_MAX_MS, Number(opts.waitMs) || 0));
+		// Waiting without a version means "until something changes from now".
+		const since = typeof opts.since === 'number' ? opts.since : wait > 0 ? this.state!.version : undefined;
+		if (!this.allow(`g:${p.id}`, 10, 2)) return { error: 'Slow down: use wait_seconds instead of polling get_state in a tight loop.' };
 		if (typeof since === 'number' && wait > 0 && this.state!.version <= since && !this.notices.get(p.id)?.length) {
 			await new Promise<void>((resolve) => {
 				const done = () => {
@@ -408,13 +422,24 @@ export class GameRoomObject extends DurableObject<Env> {
 		const p = this.agentByToken(token);
 		if (!p) return { error: 'Session expired or room closed. Join again.' };
 		const scale = large ? 1 : 0.5;
-		return { png: await opsToPngBase64(this.loadOps(), scale), width: LIMITS.canvasWidth * scale, height: LIMITS.canvasHeight * scale };
+		if (!this.allow(`v:${p.id}`, 3, 0.5)) return { error: 'Slow down: view_canvas at most every 2 seconds.' };
+		return { png: await this.canvasPng(scale), width: LIMITS.canvasWidth * scale, height: LIMITS.canvasHeight * scale };
 	}
 
 	private takeNotices(playerId: string): string[] {
 		const n = this.notices.get(playerId) ?? [];
 		this.notices.delete(playerId);
 		return n;
+	}
+
+	/** Rasterizing is CPU-heavy, so the PNG is cached until the canvas changes. */
+	private canvasPng(scale: number): Promise<string> {
+		const hit = this.pngCache.get(scale);
+		if (hit && hit.rev === this.opsRev) return hit.png;
+		const png = opsToPngBase64(this.loadOps(), scale);
+		this.pngCache.set(scale, { rev: this.opsRev, png });
+		png.catch(() => this.pngCache.delete(scale));
+		return png;
 	}
 
 	private agentViewOf(id: string): AgentView {
@@ -646,6 +671,7 @@ export class GameRoomObject extends DurableObject<Env> {
 	/** Stores an op and broadcasts it. Returns false when the canvas is full. */
 	private applyOp(op: DrawOp, exceptId?: string): boolean {
 		const sql = this.ctx.storage.sql;
+		this.opsRev++;
 		if (op.k === 'clear') {
 			sql.exec('DELETE FROM ops');
 			this.opCount = 0;
@@ -676,13 +702,34 @@ export class GameRoomObject extends DurableObject<Env> {
 		if (s.round?.drawerId !== playerId || s.phase !== 'drawing') return this.notify(playerId, "It's not your turn to draw.");
 		const shapes = cleanShapes(raw);
 		if (!shapes.length) return this.notify(playerId, 'No valid shapes to draw. Check the shape format.');
-		this.enqueueOps(playerId, shapesToOps(shapes, this.nextStrokeId()));
+		if (!this.queueShapes(playerId, shapes)) this.notify(playerId, 'The canvas is full. Undo or clear to keep drawing.');
+	}
+
+	/** Queues shapes for replay, capped so the canvas (stored plus queued) never passes the op limit. */
+	private queueShapes(playerId: string, shapes: Shape[]): boolean {
+		this.opCount ??= this.ctx.storage.sql.exec<{ n: number }>('SELECT COUNT(*) AS n FROM ops').one().n;
+		const queued = this.replay?.playerId === playerId ? this.replay.ops.length : 0;
+		const budget = LIMITS.maxOpsPerRound - this.opCount - queued;
+		if (budget <= 0) return false;
+		const ops = shapesToOps(shapes, this.nextStrokeId(), budget);
+		if (ops.length) this.enqueueOps(playerId, ops);
+		return ops.length > 0;
 	}
 
 	/** Undo/clear for agents, applied immediately. */
 	private onAgentOp(playerId: string, op: DrawOp) {
 		const s = this.state!;
 		if (s.round?.drawerId !== playerId || s.phase !== 'drawing') return this.notify(playerId, "It's not your turn to draw.");
+		const queue = this.replay?.playerId === playerId ? this.replay.ops : [];
+		if (op.k === 'undo' && queue.length) {
+			// The last shape is still replaying: drop the rest of it, and remove any part already drawn.
+			const last = queue.at(-1)!;
+			const stroke = 's' in last ? last.s : -1;
+			this.replay!.ops = queue.filter((o) => !('s' in o) || o.s !== stroke);
+			const onCanvas = this.ctx.storage.sql.exec<{ n: number }>('SELECT COUNT(*) AS n FROM ops WHERE stroke = ?', stroke).one().n;
+			if (onCanvas > 0) this.applyOp(op);
+			return;
+		}
 		this.replay = null;
 		this.applyOp(op);
 	}
@@ -757,10 +804,12 @@ export class GameRoomObject extends DurableObject<Env> {
 			const remaining = Math.max(0, (s.deadline ?? now) - (s.pausedAt ?? now));
 			const points = guesserPoints(remaining, round.durationMs, round.guessed.length);
 			player.score += points;
+			this.addTeamPoints(playerId, points);
 			const drawer = s.players[round.drawerId];
 			if (drawer) {
 				drawer.score += DRAWER_POINTS_PER_GUESS;
 				round.drawerPoints += DRAWER_POINTS_PER_GUESS;
+				this.addTeamPoints(drawer.id, DRAWER_POINTS_PER_GUESS);
 			}
 			round.guessed.push(playerId);
 			round.scoreUpdates.push({ playerId, username: player.username, points });
@@ -803,6 +852,7 @@ export class GameRoomObject extends DurableObject<Env> {
 		s.roundNumber = 0;
 		s.usedWords = [];
 		this.assignTeams();
+		s.teamTurns = { last: null, draws: {}, points: { A: 0, B: 0 } };
 		s.drawQueue = this.turnOrder();
 		s.results = null;
 		s.lastRound = null;
@@ -823,6 +873,7 @@ export class GameRoomObject extends DurableObject<Env> {
 			const delta = now - s.pausedAt;
 			if (s.deadline !== null) s.deadline += delta;
 			if (s.round) s.round.hintAt = s.round.hintAt.map((t) => t + delta);
+			for (const b of Object.values(s.bots)) if (b.nextAt !== null) b.nextAt += delta;
 			s.pausedAt = null;
 			this.system('Game resumed');
 		}
@@ -886,11 +937,19 @@ export class GameRoomObject extends DurableObject<Env> {
 		const s = this.state!;
 		const round = s.round;
 		if (s.pausedAt !== null || !round || (s.phase !== 'choosing' && s.phase !== 'drawing')) return;
+		// Bots only play while a human or agent is here, so they never burn AI calls for nobody.
+		const audience = s.order.some((id) => s.players[id].kind !== 'bot' && s.players[id].connected);
+		const today = utcDay();
 		for (const id of s.order) {
 			const p = s.players[id];
 			const b = s.bots[id];
-			if (p.kind !== 'bot' || !b || b.outOfBudget) continue;
-			if (b.nextAt === null || b.nextAt > now || this.botBusy.has(id)) continue;
+			if (p.kind !== 'bot' || !b) continue;
+			if (b.nextAt === null || b.nextAt > now) continue;
+			if (this.botBusy.has(id) || !audience) {
+				// Check back later instead of leaving a past timer that would re-fire the alarm at once.
+				b.nextAt = now + 2_000;
+				continue;
+			}
 			b.nextAt = null;
 			if (round.drawerId === id) {
 				if (s.phase === 'choosing' && !round.word) this.chooseWord(round, pickRandom(round.choices));
@@ -900,7 +959,7 @@ export class GameRoomObject extends DurableObject<Env> {
 				}
 				continue;
 			}
-			if (s.phase !== 'drawing' || round.guessed.includes(id) || b.guesses >= BOT_MAX_GUESSES) continue;
+			if (s.phase !== 'drawing' || round.guessed.includes(id) || b.guesses >= BOT_MAX_GUESSES || b.outOfBudget === today) continue;
 			b.nextAt = now + between(BOT_GUESS_EVERY_MS);
 			// Nothing worth looking at yet.
 			if (visibleOps(this.loadOps()).length < 3) continue;
@@ -927,13 +986,13 @@ export class GameRoomObject extends DurableObject<Env> {
 	/** Runs a model call off the alarm, marking the bot as thinking. Errors never break the room. */
 	private think(botId: string, fn: () => Promise<void>) {
 		this.botBusy.add(botId);
-		this.broadcastState();
+		this.broadcastState(undefined, false);
 		this.ctx.waitUntil(
 			fn()
 				.catch((err) => console.warn(JSON.stringify({ msg: 'bot error', botId, error: String(err) })))
 				.finally(async () => {
 					this.botBusy.delete(botId);
-					if (this.state?.players[botId]) this.broadcastState();
+					if (this.state?.players[botId]) this.broadcastState(undefined, false);
 					await this.commit();
 				}),
 		);
@@ -945,15 +1004,24 @@ export class GameRoomObject extends DurableObject<Env> {
 
 	/** Checks the shared daily AI budget. A bot that runs out says so once and sits quietly. */
 	private async spendAi(botId: string, model: BotModel): Promise<boolean> {
-		let ok = true;
-		try {
-			ok = await this.env.GLOBAL_STATS.getByName('global').spendAi(model.paid);
-		} catch (err) {
-			console.warn('ai budget check failed', err);
+		const s = this.state!;
+		const day = utcDay();
+		if (s.aiSpend?.day !== day) s.aiSpend = { day, free: 0, paid: 0 };
+		const room = s.aiSpend;
+		let ok = model.paid ? room.paid < ROOM_AI_PAID_CALLS : room.free < ROOM_AI_FREE_CALLS;
+		if (ok) {
+			try {
+				ok = await this.env.GLOBAL_STATS.getByName('global').spendAi(model.paid);
+			} catch (err) {
+				// Fail closed: a broken budget check must not mean an unlimited budget.
+				console.warn('ai budget check failed', err);
+				ok = false;
+			}
 		}
+		if (ok) room[model.paid ? 'paid' : 'free']++;
 		const b = this.state?.bots[botId];
-		if (!ok && b && !b.outOfBudget) {
-			b.outOfBudget = true;
+		if (!ok && b && b.outOfBudget !== day) {
+			b.outOfBudget = day;
 			this.system(`${this.state!.players[botId].username} is out of energy for today (AI budget reached).`);
 		}
 		return ok;
@@ -970,7 +1038,7 @@ export class GameRoomObject extends DurableObject<Env> {
 		if (!this.stillGuessing(botId, roundNumber) || !(await this.spendAi(botId, model))) return;
 		const round = this.state!.round!;
 		const word = round.word!;
-		const png = await opsToPngBase64(this.loadOps(), 0.5);
+		const png = await this.canvasPng(0.5);
 		const b = this.state!.bots[botId];
 		const others = this.state!.chat.filter((m) => m.kind === 'chat' && m.round === undefined && m.ts >= (round.drawStartedAt ?? 0)).map((m) => m.text);
 		const tried = [...new Set([...b.tried, ...others])];
@@ -999,9 +1067,8 @@ export class GameRoomObject extends DurableObject<Env> {
 		try {
 			// Shapes stream in as the model writes them, so the drawing starts within a second or two.
 			await this.brain.plan(model, s.round!.word!, (shapes) => {
-				if (!stillDrawing()) return;
+				if (!stillDrawing() || !this.queueShapes(botId, shapes)) return false;
 				drawn += shapes.length;
-				this.enqueueOps(botId, shapesToOps(shapes, this.nextStrokeId()));
 			});
 		} catch (err) {
 			console.warn(JSON.stringify({ msg: 'bot plan failed', model: model.id, error: String(err) }));
@@ -1048,26 +1115,43 @@ export class GameRoomObject extends DurableObject<Env> {
 		return members('A').length <= members('B').length ? 'A' : 'B';
 	}
 
-	/** Drawing order: join order, or alternating teams so neither side draws twice in a row. */
+	/** Free-for-all drawing order: join order. Team games use nextTeamDrawer() instead. */
 	private turnOrder(): string[] {
+		return [...this.state!.order];
+	}
+
+	/**
+	 * Team games: teams take turns even when uneven, and within a team whoever has drawn least goes
+	 * next (join order breaks ties). If one team has nobody connected, the other team draws.
+	 */
+	private nextTeamDrawer(): string | undefined {
 		const s = this.state!;
-		if (s.settings.mode !== 'teams') return [...s.order];
-		const a = s.order.filter((id) => s.players[id].team === 'A');
-		const b = s.order.filter((id) => s.players[id].team === 'B');
-		const out: string[] = [];
-		for (let i = 0; i < Math.max(a.length, b.length); i++) {
-			if (a[i]) out.push(a[i]);
-			if (b[i]) out.push(b[i]);
-		}
-		return out;
+		const t = (s.teamTurns ??= { last: null, draws: {}, points: { A: 0, B: 0 } });
+		const pick = (team: Team) =>
+			s.order.filter((id) => s.players[id].team === team && s.players[id].connected).sort((x, y) => (t.draws[x] ?? 0) - (t.draws[y] ?? 0))[0];
+		const preferred: Team = t.last === 'A' ? 'B' : 'A';
+		const other: Team = preferred === 'A' ? 'B' : 'A';
+		const team = pick(preferred) ? preferred : pick(other) ? other : null;
+		if (!team) return undefined;
+		const id = pick(team)!;
+		t.draws[id] = (t.draws[id] ?? 0) + 1;
+		t.last = team;
+		return id;
+	}
+
+	/** Banks points for a player's team, so they still count if that player leaves. */
+	private addTeamPoints(playerId: string, points: number) {
+		const s = this.state!;
+		const team = s.players[playerId]?.team;
+		if (s.settings.mode !== 'teams' || !team) return;
+		(s.teamTurns ??= { last: null, draws: {}, points: { A: 0, B: 0 } }).points[team] += points;
 	}
 
 	private teamScores(): { team: Team; name: string; score: number }[] | null {
 		const s = this.state!;
 		if (s.settings.mode !== 'teams' || !s.order.some((id) => s.players[id].team)) return null;
-		return (['A', 'B'] as const)
-			.map((team) => ({ team, name: TEAM_NAMES[team], score: s.order.filter((id) => s.players[id].team === team).reduce((n, id) => n + s.players[id].score, 0) }))
-			.sort((x, y) => y.score - x.score);
+		const points = s.teamTurns?.points ?? { A: 0, B: 0 };
+		return (['A', 'B'] as const).map((team) => ({ team, name: TEAM_NAMES[team], score: points[team] })).sort((x, y) => y.score - x.score);
 	}
 
 	private async onSocketGone(ws: WebSocket) {
@@ -1091,7 +1175,7 @@ export class GameRoomObject extends DurableObject<Env> {
 		const connected = (id: string) => s.players[id]?.connected;
 		s.drawQueue = s.drawQueue.filter((id) => s.players[id]);
 		if (!s.drawQueue.some(connected)) s.drawQueue = this.turnOrder();
-		const drawerId = s.drawQueue.find(connected);
+		const drawerId = s.settings.mode === 'teams' ? this.nextTeamDrawer() : s.drawQueue.find(connected);
 		if (!drawerId || s.order.length < 2) return this.finishGame('Not enough players');
 		s.drawQueue = s.drawQueue.filter((id) => id !== drawerId);
 
@@ -1372,8 +1456,9 @@ export class GameRoomObject extends DurableObject<Env> {
 		}
 	}
 
-	private broadcastState(exceptId?: string) {
-		this.bump();
+	/** `bump` false: cosmetic changes (bot "Thinking" tags) that shouldn't wake waiting agents. */
+	private broadcastState(exceptId?: string, bump = true) {
+		if (bump) this.bump();
 		for (const ws of this.ctx.getWebSockets()) {
 			const id = (ws.deserializeAttachment() as Attachment | null)?.playerId;
 			if (id && id !== exceptId && this.state?.players[id]) this.send(ws, { type: 'state', state: this.viewState(id) });

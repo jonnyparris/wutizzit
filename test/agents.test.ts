@@ -130,6 +130,15 @@ describe('shapes and raster', () => {
 		expect([...png.slice(0, 8)]).toEqual([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 	});
 
+	it('stops making ops at the budget, even for huge shapes', () => {
+		const zigzag = Array.from({ length: 200 }, (_, i) => [i % 2 ? 0 : 800, i % 2 ? 0 : 500]);
+		const shapes = cleanShapes(Array.from({ length: 80 }, () => ({ type: 'line', points: zigzag })));
+		const ops = shapesToOps(shapes, 1, 500);
+		expect(ops.length).toBe(500);
+		// Without a budget, densifying is still bounded per shape.
+		expect(shapesToOps(shapes.slice(0, 1), 1).length).toBeLessThan(300);
+	});
+
 	it('applies undo and clear like clients do', () => {
 		const ops: any[] = [{ k: 'line', s: 1, c: '#000000', w: 4, p: [1, 1, 2, 2] }, { k: 'line', s: 2, c: '#000000', w: 4, p: [1, 1, 2, 2] }, { k: 'undo' }];
 		expect(visibleOps(ops).map((o: any) => o.s)).toEqual([1]);
@@ -227,7 +236,90 @@ describe('bots', () => {
 	});
 });
 
+describe('bot budget', () => {
+	it('skips a bot drawing turn when the AI budget is spent, and fails closed', async () => {
+		const { roomId, client } = await humanRoom();
+		await installFakeBrain(roomId, {});
+		client.send({ type: 'add-bot' });
+		await client.state((x) => x.players.length === 2);
+		await inRoom(roomId, (obj) => {
+			const real = obj.env.GLOBAL_STATS;
+			const broken = (stub: any) => new Proxy(stub, { get: (t, k) => (k === 'spendAi' ? async () => Promise.reject(new Error('down')) : t[k]) });
+			obj.env = { ...obj.env, GLOBAL_STATS: { getByName: (n: string) => broken(real.getByName(n)) } };
+		});
+		client.send({ type: 'start', settings: { maxRounds: 2, roundDuration: 60 } });
+		await client.state((x) => x.phase === 'choosing');
+		client.send({ type: 'choose', index: 0 });
+		await client.state((x) => x.phase === 'drawing');
+		await inRoom(roomId, (obj) => obj.endRound('test'));
+		await inRoom(roomId, (obj) => obj.nextRoundOrFinish());
+		await stepBots(roomId); // choose
+		await client.state((x) => x.phase === 'drawing' && x.round.drawerId !== x.you.id);
+		await stepBots(roomId); // try to draw: no budget
+		await client.next((m) => m.type === 'chat' && /out of energy/.test(m.msg.text));
+		await client.state((x) => x.phase === 'intermission');
+	});
+
+	it('does not run bots with nobody watching, and shifts their timers on pause', async () => {
+		const { roomId, client, playerId } = await humanRoom();
+		await installFakeBrain(roomId, {});
+		client.send({ type: 'add-bot' });
+		await client.state((x) => x.players.length === 2);
+		client.send({ type: 'start', settings: { maxRounds: 2, roundDuration: 60 } });
+		await client.state((x) => x.phase === 'choosing');
+		client.send({ type: 'choose', index: 0 });
+		await client.state((x) => x.phase === 'drawing');
+		for (let i = 0; i < 4; i++) client.send({ type: 'draw', op: { k: 'line', s: i + 1, c: '#000000', w: 4, p: [10, 10, 200, 200] } });
+		await sleep(50);
+
+		client.send({ type: 'pause' });
+		await client.state((x) => x.paused);
+		let nextAt = 0;
+		await inRoom(roomId, (obj) => {
+			nextAt = (Object.values(obj.state.bots)[0] as any).nextAt;
+			obj.state.pausedAt -= 5_000; // pretend we were paused for 5s
+		});
+		client.send({ type: 'pause' });
+		await client.state((x) => !x.paused);
+		await inRoom(roomId, (obj) => {
+			expect((Object.values(obj.state.bots)[0] as any).nextAt).toBeGreaterThanOrEqual(nextAt + 5_000);
+			// Nobody watching: the human drops to reconnect grace.
+			obj.state.players[playerId].connected = false;
+		});
+		await stepBots(roomId);
+		await inRoom(roomId, (obj) => {
+			const b = Object.values(obj.state.bots)[0] as any;
+			expect(b.guesses).toBe(0);
+			expect(b.nextAt).toBeGreaterThan(Date.now());
+		});
+	});
+});
+
 describe('teams', () => {
+	it('alternates teams even when they are uneven, and keeps points of players who left', async () => {
+		const { roomId, client } = await humanRoom();
+		for (let i = 0; i < 3; i++) client.send({ type: 'add-bot' });
+		await client.state((x) => x.players.length === 4);
+		client.send({ type: 'start', settings: { maxRounds: 8, roundDuration: 60, mode: 'teams', teamSplit: 'humans-vs-ai' } });
+		await client.state((x) => x.phase === 'choosing');
+		const teams: string[] = [];
+		await inRoom(roomId, (obj) => {
+			for (let r = 0; r < 6; r++) {
+				teams.push(obj.state.players[obj.state.round.drawerId].team);
+				obj.endRound('test');
+				obj.nextRoundOrFinish();
+			}
+		});
+		expect(teams).toEqual(['A', 'B', 'A', 'B', 'A', 'B']);
+		await inRoom(roomId, (obj) => {
+			const bot = obj.state.order.find((id: string) => obj.state.players[id].kind === 'bot');
+			obj.addTeamPoints(bot, 120);
+			obj.removePlayer(bot, 'kicked');
+		});
+		const s = await client.state((x) => x.players.length === 3 && x.phase !== 'lobby');
+		expect(s.teams.find((t: any) => t.team === 'B').score).toBe(120);
+	});
+
 	it('puts humans against AI and reports team scores', async () => {
 		const { roomId, client } = await humanRoom();
 		client.send({ type: 'add-bot' });
@@ -284,6 +376,32 @@ describe('MCP agents', () => {
 		expect(after.lastRound.word).toBe(word);
 		expect(after.lastRound).toMatchObject({ drawer: 'Claude', drawerPoints: 50 });
 		}, 15_000);
+
+	it('keeps private notices when waiting without a version', async () => {
+		const { session } = await toolJson('create_room', { name: 'Noticer' });
+		const roomId = session.split('.')[0];
+		await inRoom(roomId, (obj) => obj.notify(obj.state.order[0], 'Psst'));
+		const view = await toolJson('get_state', { session, wait_seconds: 2 });
+		expect(view.notices).toContain('Psst');
+	});
+
+	it('takes back a queued shape on undo', async () => {
+		const { session } = await toolJson('create_room', { name: 'Undoer' });
+		const roomId = session.split('.')[0];
+		const joined = await post(`/rooms/${roomId}/join`, { username: 'Alice' });
+		const alice = await Client.connect(roomId, joined.body.token);
+		await alice.next((m) => m.type === 'welcome');
+		await toolJson('start_game', { session, rounds: 2, draw_seconds: 60 });
+		await toolJson('choose_word', { session, index: 0 });
+		const big = { type: 'rect', x: 50, y: 50, w: 700, h: 400 };
+		await toolJson('draw', { session, shapes: [big, { ...big, x: 60 }, { ...big, x: 70 }] });
+		await toolJson('undo', { session });
+		await sleep(3000);
+		await inRoom(roomId, (obj) => {
+			const strokes = new Set(obj.loadOps().map((o: any) => o.s));
+			expect([...strokes].sort()).toEqual([1, 2]);
+		});
+	}, 10_000);
 
 	it('long-polls until something changes, and reports private notices', async () => {
 		const { session } = await toolJson('create_room', { name: 'Waiter' });

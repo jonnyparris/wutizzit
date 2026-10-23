@@ -22,9 +22,30 @@ export interface BotModel {
 const WAI_ARTIST = { drawModel: '@cf/openai/gpt-oss-120b', reasoningEffort: 'low' } as const;
 
 export const BOT_MODELS: readonly BotModel[] = [
-	{ id: '@cf/mistralai/mistral-small-3.1-24b-instruct', label: 'Mistral Small 3.1', short: 'Mistral', provider: 'workers-ai', paid: false, ...WAI_ARTIST },
-	{ id: '@cf/meta/llama-4-scout-17b-16e-instruct', label: 'Llama 4 Scout', short: 'Scout', provider: 'workers-ai', paid: false, ...WAI_ARTIST },
-	{ id: '@cf/meta/llama-3.2-11b-vision-instruct', label: 'Llama 3.2 Vision', short: 'Llama', provider: 'workers-ai', paid: false, ...WAI_ARTIST },
+	{
+		id: '@cf/mistralai/mistral-small-3.1-24b-instruct',
+		label: 'Mistral Small 3.1',
+		short: 'Mistral',
+		provider: 'workers-ai',
+		paid: false,
+		...WAI_ARTIST,
+	},
+	{
+		id: '@cf/meta/llama-4-scout-17b-16e-instruct',
+		label: 'Llama 4 Scout',
+		short: 'Scout',
+		provider: 'workers-ai',
+		paid: false,
+		...WAI_ARTIST,
+	},
+	{
+		id: '@cf/meta/llama-3.2-11b-vision-instruct',
+		label: 'Llama 3.2 Vision',
+		short: 'Llama',
+		provider: 'workers-ai',
+		paid: false,
+		...WAI_ARTIST,
+	},
 	{ id: 'openai/gpt-5.4-mini', label: 'GPT-5.4 mini', short: 'GPT', provider: 'openai', paid: true },
 	{ id: 'anthropic/claude-haiku-4.5', label: 'Claude Haiku 4.5', short: 'Claude', provider: 'anthropic', paid: true },
 	{ id: 'google/gemini-2.5-flash', label: 'Gemini 2.5 Flash', short: 'Gemini', provider: 'google', paid: true },
@@ -43,7 +64,7 @@ export interface BrainEnv {
 export interface Brain {
 	guess(model: BotModel, input: GuessInput): Promise<string[]>;
 	/** Plans a drawing. `onShapes` receives shapes as soon as they're parsed, so drawing can start early. */
-	plan(model: BotModel, word: string, onShapes?: (shapes: Shape[]) => void): Promise<Shape[]>;
+	plan(model: BotModel, word: string, onShapes?: (shapes: Shape[]) => boolean | void): Promise<Shape[]>;
 }
 
 export interface GuessInput {
@@ -144,31 +165,46 @@ export function scanCompactShapes(buf: string, from = 0): { shapes: unknown[][];
 	return { shapes, next: resume };
 }
 
-/** Reads an SSE text stream from the AI binding, yielding text deltas in either response shape. */
-export async function* streamText(stream: ReadableStream<Uint8Array>): AsyncGenerator<string> {
+/**
+ * Reads an SSE text stream from the AI binding, yielding text deltas in either response shape.
+ * Stops at `deadline` even if the stream stalls, and always cancels the upstream generation.
+ */
+export async function* streamText(stream: ReadableStream<Uint8Array>, deadline = Infinity): AsyncGenerator<string> {
 	const reader = stream.pipeThrough(new TextDecoderStream()).getReader();
 	let buf = '';
-	for (;;) {
-		const { value, done } = await reader.read();
-		if (done) break;
-		buf += value;
-		let nl: number;
-		while ((nl = buf.indexOf('\n')) >= 0) {
-			const line = buf.slice(0, nl).trim();
-			buf = buf.slice(nl + 1);
-			if (!line.startsWith('data:')) continue;
-			const data = line.slice(5).trim();
-			if (data === '[DONE]') return;
-			try {
-				const j = JSON.parse(data);
-				// Newer models send OpenAI-style deltas and a lossy `response` copy (numbers go missing): prefer the delta.
-				const delta = j.choices?.[0]?.delta?.content;
-				const t = typeof delta === 'string' ? delta : (j.response ?? '');
-				if (typeof t === 'string' && t) yield t;
-			} catch {
-				// Keep-alive or partial line.
+	let timer: ReturnType<typeof setTimeout> | null = null;
+	try {
+		for (;;) {
+			const wait = deadline - Date.now();
+			if (wait <= 0) return;
+			const timeout = new Promise<{ value: undefined; done: true }>((resolve) => {
+				timer = setTimeout(() => resolve({ value: undefined, done: true }), wait);
+			});
+			const { value, done } = await Promise.race([reader.read(), timeout]);
+			if (timer) clearTimeout(timer);
+			if (done) break;
+			buf += value;
+			let nl: number;
+			while ((nl = buf.indexOf('\n')) >= 0) {
+				const line = buf.slice(0, nl).trim();
+				buf = buf.slice(nl + 1);
+				if (!line.startsWith('data:')) continue;
+				const data = line.slice(5).trim();
+				if (data === '[DONE]') return;
+				try {
+					const j = JSON.parse(data);
+					// Newer models send OpenAI-style deltas and a lossy `response` copy (numbers go missing): prefer the delta.
+					const delta = j.choices?.[0]?.delta?.content;
+					const t = typeof delta === 'string' ? delta : (j.response ?? '');
+					if (typeof t === 'string' && t) yield t;
+				} catch {
+					// Keep-alive or partial line.
+				}
 			}
 		}
+	} finally {
+		if (timer) clearTimeout(timer);
+		reader.cancel().catch(() => {});
 	}
 }
 
@@ -183,7 +219,10 @@ export function createBrain(env: BrainEnv): Brain {
 		} else {
 			const content: unknown[] = [{ type: 'text', text }];
 			if (png) content.push({ type: 'image_url', image_url: { url: `data:image/png;base64,${png}` } });
-			messages = [{ role: 'system', content: system }, { role: 'user', content }];
+			messages = [
+				{ role: 'system', content: system },
+				{ role: 'user', content },
+			];
 		}
 		const input: Record<string, unknown> = { messages };
 		if (model.provider === 'anthropic') {
@@ -206,7 +245,9 @@ ${tried.length ? `Already guessed (wrong): ${tried.slice(-20).join(', ')}.` : ''
 Reply as {"guesses":["best","second","third"]}: up to 3 single nouns that fit the pattern, most likely first.`;
 			const out = extractJson(await run(model, system, text, png, 120));
 			const list = Array.isArray(out) ? out : (out as { guesses?: unknown })?.guesses;
-			return Array.isArray(list) ? list.filter((g): g is string => typeof g === 'string' && g.trim().length > 0).map((g) => g.trim().slice(0, 40)) : [];
+			return Array.isArray(list)
+				? list.filter((g): g is string => typeof g === 'string' && g.trim().length > 0).map((g) => g.trim().slice(0, 40))
+				: [];
 		},
 
 		async plan(model, word, onShapes) {
@@ -222,7 +263,10 @@ Use 8-20 shapes. Make it big and centred. Big outline shapes first, then details
 			// Workers AI streams: draw each shape as soon as it's complete.
 			const out = (await withTimeout(
 				(env.AI.run as any)(model.drawModel ?? model.id, {
-					messages: [{ role: 'system', content: system }, { role: 'user', content: text }],
+					messages: [
+						{ role: 'system', content: system },
+						{ role: 'user', content: text },
+					],
 					max_tokens: 3600,
 					stream: true,
 					...(model.reasoningEffort ? { reasoning_effort: model.reasoningEffort } : {}),
@@ -233,8 +277,7 @@ Use 8-20 shapes. Make it big and centred. Big outline shapes first, then details
 			const all: Shape[] = [];
 			// Small models sometimes loop on one shape; drop exact repeats.
 			const seen = new Set<string>();
-			const deadline = Date.now() + TIMEOUT_MS;
-			for await (const delta of streamText(out)) {
+			for await (const delta of streamText(out, Date.now() + TIMEOUT_MS)) {
 				buf += delta;
 				const found = scanCompactShapes(buf, next);
 				next = found.next;
@@ -244,9 +287,10 @@ Use 8-20 shapes. Make it big and centred. Big outline shapes first, then details
 				});
 				if (shapes.length) {
 					all.push(...shapes);
-					onShapes(shapes);
+					// The room returns false once the turn is over: stop generating.
+					if (onShapes(shapes) === false) break;
 				}
-				if (Date.now() > deadline || all.length >= 40) break;
+				if (all.length >= 40) break;
 			}
 			return all;
 		},

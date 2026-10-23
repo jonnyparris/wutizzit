@@ -179,7 +179,8 @@ export function cleanShapes(raw: unknown): Shape[] {
 function densify(points: Point[], step: number = SHAPE_LIMITS.step): Point[] {
 	if (points.length < 2) return points;
 	const out: Point[] = [points[0]];
-	for (let i = 1; i < points.length; i++) {
+	// Two full-length diagonals' worth: plenty for any real shape, bounded for zig-zag spam.
+	for (let i = 1; i < points.length && out.length < 2000; i++) {
 		const [ax, ay] = points[i - 1];
 		const [bx, by] = points[i];
 		const n = Math.max(1, Math.ceil(Math.hypot(bx - ax, by - ay) / step));
@@ -204,29 +205,34 @@ const round1 = (v: number) => Math.round(v * 10) / 10;
  * Converts shapes to draw ops. Each shape gets its own stroke id (so one undo removes one shape)
  * and long outlines are split into overlapping chunks of a few points for gradual replay.
  */
-export function shapesToOps(shapes: readonly Shape[], firstStrokeId: number): DrawOp[] {
+export function shapesToOps(shapes: readonly Shape[], firstStrokeId: number, maxOps = Infinity): DrawOp[] {
 	const ops: DrawOp[] = [];
+	// Stops early once `maxOps` is reached, so a huge request can't build a huge array.
+	const full = () => ops.length >= maxOps;
 	let s = firstStrokeId;
 	const stroke = (pts: Point[], color: string, width: number) => {
+		if (full()) return;
 		const dense = densify(pts);
 		if (dense.length === 1) {
 			ops.push({ k: 'line', s, c: color, w: Math.round(width), p: [round1(dense[0][0]), round1(dense[0][1])] });
 			return;
 		}
 		const size = SHAPE_LIMITS.chunkPoints;
-		for (let i = 0; i < dense.length - 1; i += size - 1) {
+		for (let i = 0; i < dense.length - 1 && !full(); i += size - 1) {
 			const part = dense.slice(i, i + size);
 			if (part.length < 2) break;
 			ops.push({ k: 'line', s, c: color, w: Math.round(width), p: part.flatMap(([x, y]) => [round1(x), round1(y)]) });
 		}
 	};
 	const fillAt = ([x, y]: Point, color: string) => {
+		if (full()) return;
 		const fx = Math.floor(Math.max(0, Math.min(LIMITS.canvasWidth - 1, x)));
 		const fy = Math.floor(Math.max(0, Math.min(LIMITS.canvasHeight - 1, y)));
 		ops.push({ k: 'fill', s, c: color, x: fx, y: fy });
 	};
 
 	for (const sh of shapes) {
+		if (full()) break;
 		const color = 'color' in sh && sh.color ? sh.color : PALETTE.black;
 		const width = 'width' in sh && sh.width ? sh.width : 6;
 		switch (sh.type) {

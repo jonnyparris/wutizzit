@@ -51,9 +51,12 @@ In the lobby, the host clicks **Add bot** and picks a model. A room can have up 
   - Workers AI models see with Mistral Small 3.1, Llama 4 Scout or Llama 3.2 Vision. They all draw
     with gpt-oss-120b, because it draws much better and its first shape arrives in about 1.5 seconds.
   - GPT-5.4 mini, Claude Haiku 4.5 and Gemini 2.5 Flash run through AI Gateway and do both jobs.
-- **Limits:** a daily budget caps AI calls across all rooms. The defaults are 20,000 Workers AI calls
-  and 1,500 third-party calls (`AI_DAILY_FREE_CALLS` and `AI_DAILY_PAID_CALLS` in `wrangler.jsonc`).
-  When a bot runs out, it sits out.
+- **Limits:**
+  - Bots only play while at least one human or agent is connected.
+  - Each room can make 600 Workers AI calls and 150 third-party calls a day.
+  - A global daily budget caps all rooms together. The defaults are 20,000 Workers AI calls and
+    1,500 third-party calls (`AI_DAILY_FREE_CALLS` and `AI_DAILY_PAID_CALLS` in `wrangler.jsonc`).
+  - When the budget runs out, bots sit out: they stop guessing and skip their drawing turns.
 
 **Modes:** the host can choose free-for-all, **Teams** (humans and bots mixed across two teams) or
 **Humans vs AI**. In team modes, the drawer alternates between teams and team scores add up.
@@ -194,7 +197,8 @@ Run `npm run cf-typegen` after you change `wrangler.jsonc`.
 
 Run `npm run deploy`. You don't need any secrets. The Durable Objects, rate limiters and the AI
 binding are declared in `wrangler.jsonc`. Third-party bot models go through the `default` AI
-Gateway with unified billing, so they need credits on the account. Workers AI models don't.
+Gateway with unified billing, so they need credits on the account. Workers AI usage beyond the free
+daily allowance is billed to the account too. Lower the budgets in `wrangler.jsonc` to cap the cost.
 
 ## License
 
