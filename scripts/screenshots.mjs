@@ -1,11 +1,13 @@
 // Regenerates the README screenshots in docs/screenshots/.
 // Usage: npm run dev, then BASE_URL=http://localhost:8787 node scripts/screenshots.mjs
 // Needs `npx playwright install chromium`, or CHROMIUM_PATH pointing at a Chromium binary.
+// The results shot calls the client's window.wutizzit.showWinner() directly instead of playing every round.
 import { mkdirSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright-core';
 
 const BASE = process.env.BASE_URL ?? 'http://localhost:8787';
-const OUT = new URL('../docs/screenshots', import.meta.url).pathname;
+const OUT = fileURLToPath(new URL('../docs/screenshots', import.meta.url));
 mkdirSync(OUT, { recursive: true });
 
 const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH || undefined, headless: true });
@@ -33,6 +35,9 @@ try {
 	await alice.click('#word-list-btn');
 	await alice.fill('#custom-words', 'house\nrocket\nsnowman\nlighthouse\ncactus');
 	await alice.click('#save-words-btn');
+	// Offer all five words so "house" is always a choice, and leave plenty of time to draw.
+	await alice.selectOption('#word-choices-setting', '5');
+	await alice.selectOption('#duration-setting', '180');
 	const bob = await page(desktop);
 	await bob.goto(alice.url());
 	await bob.fill('#username-input', 'SneakyGandalf');
@@ -41,29 +46,26 @@ try {
 	await alice.waitForTimeout(400);
 	await shot(alice, 'lobby.png');
 
-	// Round 1: make Alice the drawer (the first drawer is random, so skip Bob's turn if needed).
+	// Round 1: the host (first to join) draws first.
 	await alice.click('#start-game-btn');
 	await alice.waitForFunction(() => window.wutizzit.state.phase === 'choosing');
-	const isDrawer = (p) => p.evaluate(() => window.wutizzit.state.round.drawerId === window.wutizzit.state.you.id);
-	if (!(await isDrawer(alice))) {
-		await bob.click('#canvas-overlay .choice-btn >> nth=0');
-		await bob.waitForSelector('#drawing-tools:not(.hidden)');
-		await say(alice, await bob.textContent('#current-word'));
-		await alice.waitForFunction(() => window.wutizzit.state.phase === 'choosing' && window.wutizzit.state.round.drawerId === window.wutizzit.state.you.id, null, { timeout: 45_000 });
-	}
-	await alice.waitForTimeout(400);
-	await shot(alice, 'choose.png');
-	await alice.click('#canvas-overlay .choice-btn >> text=house');
+	if (!(await alice.evaluate(() => window.wutizzit.state.round.drawerId === window.wutizzit.state.you.id))) throw new Error('expected Alice to draw first');
+	await alice.locator('#canvas-overlay .choice-btn', { hasText: /^house$/ }).click();
 	await alice.waitForSelector('#drawing-tools:not(.hidden)');
 
 	// Draw a house with a sun.
 	await alice.evaluate(() => document.getElementById('game-canvas').scrollIntoView({ block: 'center' }));
-	const box = await alice.locator('#game-canvas').boundingBox();
+	// Re-measure before every action in case a click scrolled the page.
+	const canvas = alice.locator('#game-canvas');
+	let box = await canvas.boundingBox();
+	if (!box) throw new Error('canvas not laid out');
 	const at = (x, y) => [box.x + box.width * x, box.y + box.height * y];
+	const measure = async () => (box = (await canvas.boundingBox()) ?? box);
 	const color = (i) => alice.click(`#color-picker-grid button >> nth=${i}`);
 	const size = (v) => alice.locator('#brush-size').fill(String(v));
 	const stroke = async (pts) => {
 		await alice.click('#brush-tool');
+		await measure();
 		await alice.mouse.move(...at(...pts[0]));
 		await alice.mouse.down();
 		for (const pt of pts.slice(1)) await alice.mouse.move(...at(...pt), { steps: 12 });
@@ -72,13 +74,12 @@ try {
 	const fill = async (i, x, y) => {
 		await color(i);
 		await alice.click('#fill-tool');
+		await measure();
 		await alice.mouse.click(...at(x, y));
 	};
 	const circle = (cx, cy, r) =>
 		Array.from({ length: 33 }, (_, k) => [cx + (r * Math.cos((k / 32) * 2 * Math.PI) * box.height) / box.width, cy + r * Math.sin((k / 32) * 2 * Math.PI)]);
 
-	await color(0);
-	await size(6);
 	await color(0);
 	await size(6);
 	await stroke([[0, 0.86], [1, 0.86]]); // ground

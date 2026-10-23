@@ -233,7 +233,7 @@ export class GameRoomObject extends DurableObject<Env> {
 		}
 
 		if ((s.bans[input.ipHash] ?? 0) > Date.now()) {
-			return { ok: false, status: 403, error: 'You were removed from this room. Try again in a few minutes.' };
+			return { ok: false, status: 403, error: 'You were removed from this room. Try again in 10 minutes.' };
 		}
 		if (s.order.length >= LIMITS.maxPlayers) return { ok: false, status: 409, error: 'Room is full.' };
 		if (nameTaken()) return { ok: false, status: 409, error: 'That username is taken in this room.' };

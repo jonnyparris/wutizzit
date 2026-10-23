@@ -25,18 +25,25 @@ It runs entirely on Cloudflare Workers and Durable Objects.
 4. Everyone else types guesses into the chat. The faster you guess, the more you score.
 5. After the last round, the results screen shows the podium.
 
+<table>
+  <tr>
+    <td><img src="docs/screenshots/lobby.png" alt="Lobby with host settings: rounds, draw time, word choices and custom words" /></td>
+    <td><img src="docs/screenshots/round-scores.png" alt="End of a round: the word and the points each player earned" /></td>
+  </tr>
+</table>
+
 ## Features
 
 **Game**
 - 2 to 10 players per room.
 - Host settings:
-  - Rounds come in multiples of the player count, so everyone draws equally often.
+  - Rounds come in multiples of the player count, so everyone draws equally often (unless someone joins mid-game).
   - Draw time of 30 seconds to 3 minutes.
   - 2 to 5 word choices per turn.
 - Custom word lists (5 to 500 words), or the built-in list of about 350 words.
 - Letter-slot hints that reveal letters as time runs out.
-- Words don't repeat within a game.
-- Scoring: guessers get 50 to 250 points depending on speed. The drawer gets 50 per correct guess.
+- Words don't repeat until the list runs out. Small custom lists start repeating sooner.
+- Scoring: guessers get 25 to 250 points, more for guessing fast and guessing first. The drawer gets 50 per correct guess.
 - Near misses ("hous") and guesses that contain the word are shown only to you, so nobody can copy them.
 
 **Drawing**
@@ -48,7 +55,7 @@ It runs entirely on Cloudflare Workers and Durable Objects.
 **Rooms**
 - Refresh or lose Wi-Fi and you keep your seat and score for 30 seconds.
 - Players who join mid-round see the full drawing.
-- The host can pause, and can remove a player. Removed players can't rejoin for 10 minutes.
+- The host can pause, and can remove a player. The ban applies to the player's network (IP address) for 10 minutes, so others on the same Wi-Fi are blocked too.
 - If the host leaves, another player becomes the host.
 
 **Interface**
@@ -61,7 +68,7 @@ It runs entirely on Cloudflare Workers and Durable Objects.
 - **Frontend:** vanilla JavaScript, HTML5 Canvas, Tailwind CSS v4 compiled at build time.
 - **Backend:** a Cloudflare Worker plus SQLite-backed Durable Objects, using RPC and alarms.
 - **Real time:** the WebSocket Hibernation API, so idle rooms cost nothing.
-- **Abuse protection:** the Workers Rate Limiting binding on room creation and joins, and per-socket token buckets.
+- **Abuse protection:** the Workers Rate Limiting binding on room creation and joins, and per-player in-memory token buckets for draw, chat and resync messages.
 - **Hosting:** Workers Static Assets, with SPA fallback for `/room/:code` links.
 
 ### Architecture
@@ -127,4 +134,4 @@ limiters are declared in `wrangler.jsonc`.
 
 ## License
 
-MIT
+MIT. See [LICENSE](LICENSE).
