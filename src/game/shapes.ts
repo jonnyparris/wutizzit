@@ -178,17 +178,19 @@ export function cleanShapes(raw: unknown): Shape[] {
 
 const MAX_DENSE_POINTS = 2000;
 
-function densify(points: Point[], step: number = SHAPE_LIMITS.step): Point[] {
-	if (points.length < 2) return points;
+/** Adds points every `step` px. `truncated` is set when the point cap cut the outline short. */
+function densify(points: Point[], step: number = SHAPE_LIMITS.step): { dense: Point[]; truncated: boolean } {
+	if (points.length < 2) return { dense: points, truncated: false };
 	const out: Point[] = [points[0]];
+	let i = 1;
 	// ~12,000px of outline: plenty for any real shape, bounded for zig-zag spam.
-	for (let i = 1; i < points.length && out.length < MAX_DENSE_POINTS; i++) {
+	for (; i < points.length && out.length < MAX_DENSE_POINTS; i++) {
 		const [ax, ay] = points[i - 1];
 		const [bx, by] = points[i];
 		const n = Math.max(1, Math.ceil(Math.hypot(bx - ax, by - ay) / step));
 		for (let t = 1; t <= n; t++) out.push([ax + ((bx - ax) * t) / n, ay + ((by - ay) * t) / n]);
 	}
-	return out;
+	return { dense: out, truncated: i < points.length };
 }
 
 function ellipsePoints(cx: number, cy: number, rx: number, ry: number): Point[] {
@@ -215,7 +217,7 @@ export function shapesToOps(shapes: readonly Shape[], firstStrokeId: number, max
 	/** False if the outline was cut short (op budget or point cap), so a fill would leak out of it. */
 	const stroke = (pts: Point[], color: string, width: number): boolean => {
 		if (full()) return false;
-		const dense = densify(pts);
+		const { dense, truncated } = densify(pts);
 		if (dense.length === 1) {
 			ops.push({ k: 'line', s, c: color, w: Math.round(width), p: [round1(dense[0][0]), round1(dense[0][1])] });
 			return true;
@@ -225,7 +227,7 @@ export function shapesToOps(shapes: readonly Shape[], firstStrokeId: number, max
 			const part = dense.slice(i, i + size);
 			if (part.length < 2) break;
 			ops.push({ k: 'line', s, c: color, w: Math.round(width), p: part.flatMap(([x, y]) => [round1(x), round1(y)]) });
-			if (i + size >= dense.length) return dense.length < MAX_DENSE_POINTS;
+			if (i + size >= dense.length) return !truncated;
 		}
 		return false;
 	};

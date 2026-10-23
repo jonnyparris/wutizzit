@@ -385,6 +385,8 @@ export class GameRoomObject extends DurableObject<Env> {
 		const p = this.agentByToken(token);
 		if (!p) return { ok: false, error: 'Session expired or room closed. Join again.', notices: [] };
 		if (!action || typeof action !== 'object' || typeof action.type !== 'string') return { ok: false, error: 'Unknown action.', notices: [] };
+		// Every agent action costs a token here, on top of the per-kind buckets in dispatch().
+		if (!this.allow(`a:${p.id}`, 10, 2)) return { ok: false, error: 'Slow down a little.', notices: [] };
 		await this.dispatch(p.id, action);
 		await this.commit();
 		return { ok: true, notices: this.takeNotices(p.id) };
@@ -1306,6 +1308,7 @@ export class GameRoomObject extends DurableObject<Env> {
 		this.buckets.delete(`u:${playerId}`);
 		this.buckets.delete(`g:${playerId}`);
 		this.buckets.delete(`v:${playerId}`);
+		this.buckets.delete(`a:${playerId}`);
 		this.resyncPending.delete(playerId);
 		this.notices.delete(playerId);
 		delete s.bots[playerId];

@@ -139,6 +139,9 @@ describe('shapes and raster', () => {
 		const rect = cleanShapes([['rect', 100, 100, 600, 300, 'black', 'red']]);
 		expect(shapesToOps(rect, 1, 3).some((o) => o.k === 'fill')).toBe(false);
 		expect(shapesToOps(rect, 1).some((o) => o.k === 'fill')).toBe(true);
+		// So does one cut short by the per-shape point cap.
+		const zig = cleanShapes([{ type: 'polygon', points: Array.from({ length: 40 }, (_, i) => [i % 2 ? 750 : 50, 50 + i * 10]), fill: 'red' }]);
+		expect(shapesToOps(zig, 1).some((o) => o.k === 'fill')).toBe(false);
 		// Without a budget, densifying is still bounded per shape.
 		expect(shapesToOps(shapes.slice(0, 1), 1).length).toBeLessThan(300);
 	});
