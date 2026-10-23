@@ -1,104 +1,102 @@
-import { 
-  handleCreateRoom, 
-  handleJoinRoom, 
-  handleLeaveRoom, 
-  handleGetRoomState, 
-  handleStartGame,
-  handleWebSocket,
-  handleGetStats,
-  handleGetActiveGames,
-  handleBanPlayer,
-  handlePauseGame
-} from './handlers/rooms';
+import { generateRoomId, ROOM_ID_PATTERN, sha256Hex } from './utils/id';
 
 export { GameRoomObject } from './durable-objects/GameRoom';
 export { GlobalStatsObject } from './durable-objects/GlobalStats';
 
+/** Home page polls this; a short edge cache collapses many visitors into one DO call. */
+const LOBBY_CACHE_SECONDS = 3;
+
+const json = (body: unknown, status = 200, headers: HeadersInit = {}) =>
+	Response.json(body, { status, headers: { 'Cache-Control': 'no-store', ...headers } });
+
+const clientIp = (request: Request) => request.headers.get('CF-Connecting-IP') ?? 'local';
+
+async function readJson(request: Request): Promise<Record<string, unknown> | null> {
+	if (!request.headers.get('Content-Type')?.includes('application/json')) return null;
+	try {
+		const body = await request.json();
+		return body && typeof body === 'object' ? (body as Record<string, unknown>) : null;
+	} catch {
+		return null;
+	}
+}
+
+async function createRoom(request: Request, env: Env): Promise<Response> {
+	const { success } = await env.CREATE_LIMITER.limit({ key: clientIp(request) });
+	if (!success) return json({ error: 'Too many rooms created. Try again in a minute.' }, 429);
+
+	// 31^6 ≈ 887M codes; a collision is unlikely but cheap to retry.
+	for (let attempt = 0; attempt < 5; attempt++) {
+		const roomId = generateRoomId();
+		if (await env.GAME_ROOM.getByName(roomId).init(roomId)) return json({ roomId }, 201);
+	}
+	return json({ error: 'Could not allocate a room. Please retry.' }, 503);
+}
+
+async function joinRoom(request: Request, env: Env, roomId: string): Promise<Response> {
+	const ip = clientIp(request);
+	const { success } = await env.JOIN_LIMITER.limit({ key: ip });
+	if (!success) return json({ error: 'Too many join attempts. Try again in a minute.' }, 429);
+
+	const body = await readJson(request);
+	if (!body) return json({ error: 'Invalid request body.' }, 400);
+
+	const result = await env.GAME_ROOM.getByName(roomId).join({
+		username: body.username,
+		token: body.token,
+		// Bans are per room, keyed on a salted hash so raw IPs are never stored.
+		ipHash: await sha256Hex(`${roomId}:${ip}`),
+	});
+	return result.ok ? json(result) : json({ error: result.error }, result.status);
+}
+
+async function lobby(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+	const cache = caches.default;
+	const key = new Request(new URL('/api/lobby', request.url).toString());
+	const hit = await cache.match(key);
+	if (hit) return hit;
+
+	const snapshot = await env.GLOBAL_STATS.getByName('global').snapshot();
+	const response = Response.json(snapshot, {
+		headers: { 'Cache-Control': `public, max-age=${LOBBY_CACHE_SECONDS}` },
+	});
+	ctx.waitUntil(cache.put(key, response.clone()));
+	return response;
+}
+
 export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    const url = new URL(request.url);
-    
-    // Handle CORS preflight requests
-    if (request.method === 'OPTIONS') {
-      return new Response(null, {
-        headers: {
-          'Access-Control-Allow-Origin': '*',
-          'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-          'Access-Control-Allow-Headers': 'Content-Type',
-        },
-      });
-    }
+	async fetch(request, env, ctx): Promise<Response> {
+		const url = new URL(request.url);
+		const { pathname } = url;
+		const method = request.method;
 
-    // Add CORS headers to all responses
-    const corsHeaders = {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type',
-    };
+		try {
+			if (pathname === '/api/lobby' && method === 'GET') return await lobby(request, env, ctx);
+			if (pathname === '/rooms' && method === 'POST') return await createRoom(request, env);
 
-    try {
-      let response: Response;
+			const match = pathname.match(/^\/rooms\/([^/]+)(?:\/(join|ws))?$/);
+			if (match) {
+				const roomId = match[1].toUpperCase();
+				if (!ROOM_ID_PATTERN.test(roomId)) return json({ error: 'Invalid room code.' }, 400);
+				const action = match[2];
 
-      // Route handling
-      if (url.pathname === '/rooms' && request.method === 'POST') {
-        response = await handleCreateRoom(request, env);
-      } else if (url.pathname.match(/^\/rooms\/[^\/]+\/join$/) && request.method === 'POST') {
-        response = await handleJoinRoom(request, env);
-      } else if (url.pathname.match(/^\/rooms\/[^\/]+\/leave$/) && request.method === 'POST') {
-        response = await handleLeaveRoom(request, env);
-      } else if (url.pathname.match(/^\/rooms\/[^\/]+$/) && request.method === 'GET') {
-        response = await handleGetRoomState(request, env);
-      } else if (url.pathname.match(/^\/rooms\/[^\/]+\/start$/) && request.method === 'POST') {
-        response = await handleStartGame(request, env);
-      } else if (url.pathname.match(/^\/rooms\/[^\/]+\/ban$/) && request.method === 'POST') {
-        response = await handleBanPlayer(request, env);
-      } else if (url.pathname.match(/^\/rooms\/[^\/]+\/pause$/) && request.method === 'POST') {
-        response = await handlePauseGame(request, env);
-      } else if (url.pathname.match(/^\/rooms\/[^\/]+\/ws$/) && request.headers.get('Upgrade') === 'websocket') {
-        // WebSocket connections don't need CORS headers and they can't be modified
-        return await handleWebSocket(request, env);
-      } else if (url.pathname === '/api/stats' && request.method === 'GET') {
-        response = await handleGetStats(env);
-      } else if (url.pathname === '/api/active-games' && request.method === 'GET') {
-        response = await handleGetActiveGames(env);
-      } else if (url.pathname === '/' || url.pathname.startsWith('/assets/') || url.pathname.endsWith('.css') || url.pathname.endsWith('.js') || url.pathname.endsWith('.html')) {
-        // Serve static assets
-        return fetch(request);
-      } else {
-        response = new Response('Not Found', { status: 404 });
-      }
+				if (action === 'ws') {
+					if (request.headers.get('Upgrade') !== 'websocket') return json({ error: 'Expected WebSocket upgrade.' }, 426);
+					return env.GAME_ROOM.getByName(roomId).fetch(request);
+				}
+				if (action === 'join' && method === 'POST') return await joinRoom(request, env, roomId);
+				if (!action && method === 'GET') {
+					const summary = await env.GAME_ROOM.getByName(roomId).summary();
+					return json(summary, summary.exists ? 200 : 404);
+				}
+				return json({ error: 'Method not allowed.' }, 405);
+			}
 
-      // Add CORS headers to the response (skip for WebSocket responses)
-      if (response.headers && !response.headers.get('Upgrade')) {
-        try {
-          // Create new response with CORS headers to avoid modifying immutable headers
-          const responseClone = response.clone();
-          const newHeaders = new Headers(response.headers);
-          Object.entries(corsHeaders).forEach(([key, value]) => {
-            newHeaders.set(key, value);
-          });
-          
-          response = new Response(responseClone.body, {
-            status: response.status,
-            statusText: response.statusText,
-            headers: newHeaders
-          });
-        } catch (error) {
-          console.warn('Could not set CORS headers:', error);
-        }
-      }
-
-      return response;
-
-    } catch (error) {
-      console.error('Error handling request:', error);
-      const errorResponse = new Response('Internal Server Error', { status: 500 });
-      
-      Object.entries(corsHeaders).forEach(([key, value]) => {
-        errorResponse.headers.set(key, value);
-      });
-
-      return errorResponse;
-    }
-  },
+			if (pathname.startsWith('/api/') || pathname.startsWith('/rooms')) return json({ error: 'Not found.' }, 404);
+			return env.ASSETS.fetch(request);
+		} catch (err) {
+			console.error(JSON.stringify({ msg: 'unhandled error', path: pathname, error: String(err) }));
+			return json({ error: 'Something went wrong. Please try again.' }, 500);
+		}
+	},
 } satisfies ExportedHandler<Env>;

@@ -1,855 +1,826 @@
-import { DurableObject } from "cloudflare:workers";
-import { Player, GameRoom, GameRound, WebSocketMessage, DrawingStroke, ChatMessage } from "../types/game";
-import { generateId } from "../utils/id";
-import { getRandomWord, isWordMatch } from "../utils/words";
-
-export class GameRoomObject extends DurableObject {
-  private players: Map<string, Player> = new Map();
-  private webSockets: Map<string, WebSocket> = new Map();
-  private currentRound: GameRound | null = null;
-  private isGameActive: boolean = false;
-  private maxPlayers: number = 10;
-  private roundTimer: number | null = null;
-  private chatMessages: ChatMessage[] = [];
-  private lastDrawerIndex: number = -1;
-  private maxRounds: number = 10; // Game ends after 10 rounds
-  private roundDuration: number = 60; // Round duration in seconds (default 60s)  
-  private wordChoiceCount: number = 3; // Number of word choices for drawer (default 3)
-  private roomCreatorId: string | null = null;
-  private gameStarted: boolean = false;
-  private customWords: string[] | null = null;
-  private currentRoundNumber: number = 0;
-  private bannedPlayers: Set<string> = new Set(); // Store banned player IDs
-  private usedWords: Set<string> = new Set(); // Track used words to prevent repetition
-  private roomId: string = "";
-  private isPaused: boolean = false; // Track if game is paused
-
-  constructor(ctx: DurableObjectState, env: Env) {
-    super(ctx, env);
-  }
-
-  setRoomId(roomId: string) {
-    this.roomId = roomId;
-  }
-
-  async fetch(request: Request): Promise<Response> {
-    const url = new URL(request.url);
-    
-    // Extract room ID from headers if provided
-    const roomIdHeader = request.headers.get('X-Room-ID');
-    if (roomIdHeader && !this.roomId) {
-      this.roomId = roomIdHeader;
-    }
-    
-    if (request.headers.get("Upgrade") === "websocket") {
-      return this.handleWebSocket(request);
-    }
-
-    switch (url.pathname) {
-      case "/join":
-        return this.handleJoin(request);
-      case "/leave":
-        return this.handleLeave(request);
-      case "/state":
-        return this.handleGetState();
-      case "/start":
-        return this.handleStartGame(request);
-      case "/ban":
-        return this.handleBanPlayer(request);
-      case "/pause":
-        return this.handlePauseGame(request);
-      case "/init":
-        return this.handleInitRoom(request);
-      default:
-        return new Response("Not found", { status: 404 });
-    }
-  }
-
-  private async handleWebSocket(request: Request): Promise<Response> {
-    const webSocketPair = new WebSocketPair();
-    const [client, server] = Object.values(webSocketPair);
-
-    server.accept();
-    
-    const url = new URL(request.url);
-    const playerId = url.searchParams.get("playerId");
-    
-    if (!playerId || !this.players.has(playerId)) {
-      server.close(1008, "Invalid player ID");
-      return new Response(null, { status: 101, webSocket: client });
-    }
-
-    this.webSockets.set(playerId, server);
-    
-    server.addEventListener("message", (event) => {
-      this.handleWebSocketMessage(playerId, event.data);
-    });
-
-    server.addEventListener("close", () => {
-      this.webSockets.delete(playerId);
-      this.handlePlayerDisconnect(playerId);
-    });
-
-    // Send current game state to newly connected player
-    this.sendToPlayer(playerId, {
-      type: 'game-state',
-      data: this.getGameState(),
-      timestamp: Date.now()
-    });
-
-    return new Response(null, { status: 101, webSocket: client });
-  }
-
-  private async handleJoin(request: Request): Promise<Response> {
-    const { username } = await request.json();
-    
-    if (this.players.size >= this.maxPlayers) {
-      return Response.json({ error: "Room is full" }, { status: 400 });
-    }
-
-    if ([...this.players.values()].some(p => p.username === username)) {
-      return Response.json({ error: "Username already taken" }, { status: 400 });
-    }
-
-    const newPlayerId = generateId();
-    const player: Player = {
-      id: newPlayerId,
-      username,
-      score: 0,
-      isConnected: true
-    };
-
-    // Set room creator
-    if (!this.roomCreatorId) {
-      this.roomCreatorId = newPlayerId;
-    }
-
-    this.players.set(newPlayerId, player);
-    
-    // Update global stats
-    this.updateGlobalStats();
-    
-    this.broadcast({
-      type: 'join',
-      data: { 
-        player,
-        isCreator: newPlayerId === this.roomCreatorId,
-        gameStarted: this.gameStarted
-      },
-      timestamp: Date.now()
-    }, newPlayerId);
-
-    return Response.json({ 
-      playerId: newPlayerId, 
-      player, 
-      isCreator: newPlayerId === this.roomCreatorId,
-      gameStarted: this.gameStarted 
-    });
-  }
-
-  private async handleLeave(request: Request): Promise<Response> {
-    const { playerId } = await request.json() as any;
-    
-    if (!this.players.has(playerId)) {
-      return Response.json({ error: "Player not found" }, { status: 404 });
-    }
-
-    // Check if owner is leaving and transfer ownership
-    let newOwnerId = null;
-    if (playerId === this.roomCreatorId && this.players.size > 1) {
-      // Find the next player to become owner (first connected player that isn't leaving)
-      for (const [id, player] of this.players) {
-        if (id !== playerId && player.isConnected) {
-          this.roomCreatorId = id;
-          newOwnerId = id;
-          break;
-        }
-      }
-    }
-
-    this.players.delete(playerId);
-    this.webSockets.delete(playerId);
-
-    this.broadcast({
-      type: 'leave',
-      data: { 
-        playerId,
-        newOwnerId,
-        ownerTransferred: newOwnerId !== null
-      },
-      timestamp: Date.now()
-    });
-
-    // End round if drawer left
-    if (this.currentRound && this.currentRound.drawerId === playerId) {
-      this.endRound();
-    }
-    
-    // Update global stats with new player count
-    this.updateGlobalStats();
-    
-    // Check if all players have left and end game if needed
-    this.checkAndHandleEmptyRoom();
-
-    return Response.json({ success: true });
-  }
-
-  private async handleBanPlayer(request: Request): Promise<Response> {
-    const { requesterId, targetPlayerId } = await request.json();
-    
-    // Only room creator can ban players
-    if (requesterId !== this.roomCreatorId) {
-      return Response.json({ error: "Only room creator can ban players" }, { status: 403 });
-    }
-    
-    // Can't ban yourself
-    if (requesterId === targetPlayerId) {
-      return Response.json({ error: "Cannot ban yourself" }, { status: 400 });
-    }
-    
-    // Check if target player exists
-    if (!this.players.has(targetPlayerId)) {
-      return Response.json({ error: "Player not found" }, { status: 404 });
-    }
-    
-    const targetPlayer = this.players.get(targetPlayerId)!;
-    
-    // Add to ban list
-    this.bannedPlayers.add(targetPlayerId);
-    
-    // Remove player from game
-    this.players.delete(targetPlayerId);
-    this.webSockets.delete(targetPlayerId);
-    
-    // Broadcast ban event
-    this.broadcast({
-      type: 'player-banned',
-      data: { 
-        bannedPlayerId: targetPlayerId,
-        bannedPlayerName: targetPlayer.username
-      },
-      timestamp: Date.now()
-    });
-    
-    // End round if banned player was drawing
-    if (this.currentRound && this.currentRound.drawerId === targetPlayerId) {
-      this.endRound();
-    }
-    
-    return Response.json({ success: true });
-  }
-
-  private async handlePauseGame(request: Request): Promise<Response> {
-    const { playerId } = await request.json();
-    
-    // Only room creator can pause the game
-    if (playerId !== this.roomCreatorId) {
-      return Response.json({ error: "Only room creator can pause/unpause the game" }, { status: 403 });
-    }
-    
-    // Can only pause if game is active
-    if (!this.gameStarted || !this.currentRound) {
-      return Response.json({ error: "No active game to pause" }, { status: 400 });
-    }
-    
-    // Toggle pause state
-    this.isPaused = !this.isPaused;
-    
-    // Broadcast pause/unpause event
-    this.broadcast({
-      type: 'game-pause',
-      data: { isPaused: this.isPaused },
-      timestamp: Date.now()
-    });
-    
-    return Response.json({ success: true, isPaused: this.isPaused });
-  }
-
-  private async handleInitRoom(request: Request): Promise<Response> {
-    const { roomId } = await request.json() as any;
-    
-    if (roomId) {
-      this.setRoomId(roomId);
-    }
-    
-    return Response.json({ success: true });
-  }
-
-  private handleGetState(): Response {
-    return Response.json(this.getGameState());
-  }
-
-  private async handleStartGame(request: Request): Promise<Response> {
-    const { playerId, maxRounds, roundDuration, wordChoiceCount, customWords } = await request.json();
-    
-    if (playerId !== this.roomCreatorId) {
-      return Response.json({ error: "Only room creator can start the game" }, { status: 403 });
-    }
-
-    if (this.players.size < 2) {
-      return Response.json({ error: "Need at least 2 players to start" }, { status: 400 });
-    }
-
-    if (this.gameStarted) {
-      return Response.json({ error: "Game already started" }, { status: 400 });
-    }
-
-    // Apply custom game settings
-    if (maxRounds && maxRounds >= 5 && maxRounds <= 20) {
-      this.maxRounds = maxRounds;
-    }
-    
-    if (roundDuration && [30, 60, 90, 180].includes(roundDuration)) {
-      this.roundDuration = roundDuration;
-    }
-    
-    if (wordChoiceCount && wordChoiceCount >= 2 && wordChoiceCount <= 5) {
-      this.wordChoiceCount = wordChoiceCount;
-    }
-    
-    if (customWords && Array.isArray(customWords) && customWords.length >= 10) {
-      this.customWords = customWords.map(word => String(word).trim()).filter(word => word.length > 0);
-    }
-
-    this.gameStarted = true;
-    this.currentRoundNumber = 0; // Reset round counter for new game
-    this.usedWords.clear(); // Clear used words for the new game
-    
-    // Update global stats when game starts
-    this.updateGlobalStats();
-    
-    this.startNewRound();
-
-    return Response.json({ success: true });
-  }
-
-  private handleWebSocketMessage(playerId: string, message: string) {
-    try {
-      const msg: WebSocketMessage = JSON.parse(message);
-      
-      switch (msg.type) {
-        case 'draw':
-          this.handleDraw(playerId, msg.data);
-          break;
-        case 'guess':
-          this.handleGuess(playerId, msg.data);
-          break;
-        case 'word-choice':
-          this.handleWordChoice(playerId, msg.data);
-          break;
-        default:
-          console.warn('Unknown message type:', msg.type);
-      }
-    } catch (error) {
-      console.error('Error handling WebSocket message:', error);
-    }
-  }
-
-  private handleDraw(playerId: string, strokeData: any) {
-    if (!this.currentRound || this.currentRound.drawerId !== playerId) {
-      return; // Only drawer can draw
-    }
-
-    this.broadcast({
-      type: 'draw',
-      data: strokeData,
-      timestamp: Date.now()
-    }, playerId);
-  }
-
-  private handleGuess(playerId: string, guess: string) {
-    if (!this.currentRound || this.currentRound.drawerId === playerId) {
-      return; // Drawer can't guess
-    }
-
-    // Check if player has already guessed correctly in this round
-    if (this.currentRound.guessedPlayers.has(playerId)) {
-      return; // Player already guessed correctly, ignore further guesses
-    }
-
-    const player = this.players.get(playerId);
-    if (!player) return;
-
-    const chatMessage: ChatMessage = {
-      id: generateId(),
-      playerId,
-      username: player.username,
-      message: guess,
-      timestamp: Date.now(),
-      isGuess: true
-    };
-
-    if (isWordMatch(guess, this.currentRound.word)) {
-      chatMessage.isCorrect = true;
-      this.currentRound.guessedPlayers.add(playerId);
-      
-      // Award points
-      const timeBonus = Math.floor(this.currentRound.timeLeft / 1000);
-      player.score += 100 + timeBonus;
-      
-      // Award points to drawer
-      const drawer = this.players.get(this.currentRound.drawerId);
-      if (drawer) {
-        drawer.score += 50;
-      }
-
-      // Store score updates for round-end summary (no live updates)
-      if (!this.currentRound.scoreUpdates) {
-        this.currentRound.scoreUpdates = [];
-      }
-      this.currentRound.scoreUpdates.push({
-        playerId: playerId,
-        playerName: player.username,
-        pointsEarned: 100 + timeBonus,
-        drawerId: this.currentRound.drawerId,
-        drawerName: drawer?.username,
-        drawerPointsEarned: 50
-      });
-
-      // Check if all players guessed
-      if (this.currentRound.guessedPlayers.size === this.players.size - 1) {
-        this.endRound();
-        return;
-      }
-    } else {
-      // Mark incorrect guesses explicitly
-      chatMessage.isCorrect = false;
-    }
-
-    this.chatMessages.push(chatMessage);
-    
-    // Send chat message to players, but hide the word from those who haven't guessed
-    for (const [receiverId, ws] of this.webSockets) {
-      if (ws.readyState === WebSocket.READY_STATE_OPEN) {
-        const shouldRevealWord = chatMessage.isCorrect === false || // Wrong guess, show as-is
-          receiverId === this.currentRound.drawerId || // Drawer sees everything
-          this.currentRound.guessedPlayers.has(receiverId) || // Already guessed correctly
-          receiverId === playerId; // The person who guessed
-          
-        const messageToSend = {
-          ...chatMessage,
-          message: shouldRevealWord ? chatMessage.message : '*** guessed correctly! ***'
-        };
-        
-        const message = {
-          type: 'guess',
-          data: messageToSend,
-          timestamp: Date.now()
-        };
-        
-        ws.send(JSON.stringify(message));
-      }
-    }
-  }
-
-  private startNewRound() {
-    const playerIds = [...this.players.keys()].filter(id => this.players.get(id)?.isConnected);
-    if (playerIds.length < 2) return;
-
-    // Rotate to next player as drawer
-    this.lastDrawerIndex = (this.lastDrawerIndex + 1) % playerIds.length;
-    const drawerId = playerIds[this.lastDrawerIndex];
-    
-    this.currentRoundNumber += 1;
-    const roundNumber = this.currentRoundNumber;
-    
-    // Generate word choices based on setting
-    const wordChoices = [];
-    for (let i = 0; i < this.wordChoiceCount; i++) {
-      wordChoices.push(this.getRandomWord());
-    }
-    
-    this.currentRound = {
-      roundNumber,
-      drawerId,
-      word: '', // Will be set when drawer chooses
-      timeLeft: this.roundDuration * 1000, // Convert seconds to milliseconds
-      maxTime: this.roundDuration * 1000,
-      isActive: true,
-      guessedPlayers: new Set()
-    };
-    
-    console.log(`Starting round ${roundNumber} with drawer ${drawerId}`);
-
-    // Send word choices to drawer
-    this.sendToPlayer(drawerId, {
-      type: 'word-choice',
-      data: {
-        wordChoices,
-        timeLeft: 20000 // 20 seconds to choose
-      },
-      timestamp: Date.now()
-    });
-
-    // Send round preparation to all players
-    this.broadcast({
-      type: 'round-prepare',
-      data: {
-        drawerId,
-        roundNumber: this.currentRound.roundNumber,
-        maxRounds: this.maxRounds
-      },
-      timestamp: Date.now()
-    });
-  }
-
-  private handleWordChoice(playerId: string, chosenWord: string) {
-    if (!this.currentRound || this.currentRound.drawerId !== playerId || this.currentRound.word) {
-      return; // Invalid word choice
-    }
-
-    this.currentRound.word = chosenWord;
-
-    // Now start the actual drawing round
-    this.broadcast({
-      type: 'round-start',
-      data: {
-        drawerId: playerId,
-        timeLeft: this.currentRound.timeLeft,
-        roundNumber: this.currentRound.roundNumber,
-        maxRounds: this.maxRounds,
-        wordHint: chosenWord.replace(/[a-zA-Z]/g, '_') // Show word length as underscores
-      },
-      timestamp: Date.now()
-    });
-
-    // Send word to drawer
-    this.sendToPlayer(playerId, {
-      type: 'drawer-word',
-      data: {
-        word: chosenWord,
-        timeLeft: this.currentRound.timeLeft
-      },
-      timestamp: Date.now()
-    });
-
-    this.startRoundTimer();
-  }
-
-  private startRoundTimer() {
-    if (this.roundTimer) {
-      clearInterval(this.roundTimer);
-    }
-
-    this.roundTimer = setInterval(() => {
-      if (!this.currentRound) {
-        clearInterval(this.roundTimer!);
-        return;
-      }
-
-      // Only decrement time if game is not paused
-      if (!this.isPaused) {
-        this.currentRound.timeLeft -= 1000;
-        
-        // Broadcast timer update
-        this.broadcast({
-          type: 'timer-update',
-          data: { timeLeft: this.currentRound.timeLeft, isPaused: false },
-          timestamp: Date.now()
-        });
-        
-        if (this.currentRound.timeLeft <= 0) {
-          this.endRound();
-        }
-      } else {
-        // Still broadcast timer updates when paused to show pause state
-        this.broadcast({
-          type: 'timer-update',
-          data: { timeLeft: this.currentRound.timeLeft, isPaused: true },
-          timestamp: Date.now()
-        });
-      }
-    }, 1000);
-  }
-
-  private endRound() {
-    if (this.roundTimer) {
-      clearInterval(this.roundTimer);
-      this.roundTimer = null;
-    }
-
-    const roundData = this.currentRound;
-    const shouldEndGame = this.currentRoundNumber >= this.maxRounds;
-    
-    // Send round-end with word revealed to everyone
-    const message = {
-      type: 'round-end',
-      data: {
-        word: roundData?.word || '???',
-        scores: Object.fromEntries(this.players),
-        revealed: true,
-        scoreUpdates: roundData?.scoreUpdates || []
-      },
-      timestamp: Date.now()
-    };
-    
-    for (const [playerId, ws] of this.webSockets) {
-      if (ws.readyState === WebSocket.READY_STATE_OPEN) {
-        ws.send(JSON.stringify(message));
-      }
-    }
-
-    this.currentRound = null;
-
-    // Check if game should end
-    if (shouldEndGame) {
-      // Game finished! Announce winner
-      setTimeout(() => {
-        this.endGame();
-      }, 3000);
-    } else {
-      // Start new round after 3 seconds if we still have enough players
-      setTimeout(() => {
-        const connectedPlayers = [...this.players.values()].filter(p => p.isConnected);
-        if (connectedPlayers.length >= 2) {
-          this.startNewRound();
-        }
-      }, 3000);
-    }
-  }
-
-  private handlePlayerDisconnect(playerId: string) {
-    const player = this.players.get(playerId);
-    if (player) {
-      player.isConnected = false;
-      
-      // Check if owner disconnected and transfer ownership
-      let newOwnerId = null;
-      if (playerId === this.roomCreatorId) {
-        // Find the next connected player to become owner
-        for (const [id, p] of this.players) {
-          if (id !== playerId && p.isConnected) {
-            this.roomCreatorId = id;
-            newOwnerId = id;
-            break;
-          }
-        }
-      }
-      
-      this.broadcast({
-        type: 'leave',
-        data: { 
-          playerId,
-          newOwnerId,
-          ownerTransferred: newOwnerId !== null
-        },
-        timestamp: Date.now()
-      });
-
-      // End round if drawer disconnected
-      if (this.currentRound && this.currentRound.drawerId === playerId) {
-        this.endRound();
-      }
-      
-      // Update global stats
-      this.updateGlobalStats();
-      
-      // Check if all players have left and end game if needed
-      this.checkAndHandleEmptyRoom();
-    }
-  }
-
-  private broadcast(message: WebSocketMessage, excludePlayerId?: string) {
-    for (const [playerId, ws] of this.webSockets) {
-      if (playerId !== excludePlayerId && ws.readyState === WebSocket.READY_STATE_OPEN) {
-        ws.send(JSON.stringify(message));
-      }
-    }
-  }
-
-  private sendToPlayer(playerId: string, message: WebSocketMessage) {
-    const ws = this.webSockets.get(playerId);
-    if (ws && ws.readyState === WebSocket.READY_STATE_OPEN) {
-      ws.send(JSON.stringify(message));
-    }
-  }
-
-  private getGameState() {
-    // Only include connected players in the game state
-    const connectedPlayers = new Map();
-    for (const [id, player] of this.players) {
-      if (player.isConnected) {
-        connectedPlayers.set(id, player);
-      }
-    }
-    
-    return {
-      players: Object.fromEntries(connectedPlayers),
-      currentRound: this.currentRound ? {
-        ...this.currentRound,
-        word: undefined, // Don't send word in state
-        guessedPlayers: [...this.currentRound.guessedPlayers]
-      } : null,
-      isGameActive: this.isGameActive,
-      currentRoundNumber: this.currentRoundNumber,
-      maxRounds: this.maxRounds,
-      gameStarted: this.gameStarted,
-      chatMessages: this.chatMessages.slice(-50) // Last 50 messages
-    };
-  }
-
-  private getRandomWord(): string {
-    const wordList = this.customWords || [];
-    let availableWords: string[];
-    
-    if (wordList.length === 0) {
-      // Use default words from utils
-      const { WORDS } = require('../utils/words');
-      availableWords = WORDS.filter((word: string) => !this.usedWords.has(word.toLowerCase()));
-    } else {
-      // Use custom words
-      availableWords = wordList.filter(word => !this.usedWords.has(word.toLowerCase()));
-    }
-    
-    // If all words have been used, reset the used words set
-    if (availableWords.length === 0) {
-      this.usedWords.clear();
-      availableWords = wordList.length === 0 ? require('../utils/words').WORDS : wordList;
-    }
-    
-    const selectedWord = availableWords[Math.floor(Math.random() * availableWords.length)];
-    this.usedWords.add(selectedWord.toLowerCase());
-    
-    return selectedWord;
-  }
-
-  private checkAndHandleEmptyRoom() {
-    const connectedPlayers = [...this.players.values()].filter(p => p.isConnected);
-    
-    if (connectedPlayers.length === 0) {
-      // All players have left, end the game immediately
-      if (this.roundTimer) {
-        clearInterval(this.roundTimer);
-        this.roundTimer = null;
-      }
-      
-      this.currentRound = null;
-      this.isGameActive = false;
-      this.gameStarted = false;
-      this.currentRoundNumber = 0;
-      this.lastDrawerIndex = -1;
-      
-      // Clear all player scores
-      this.players.forEach(player => {
-        player.score = 0;
-      });
-      
-      console.log('All players left, game ended and reset');
-      
-      // Unregister from global stats when room is empty
-      this.unregisterFromGlobalStats();
-    } else if (connectedPlayers.length === 1 && this.gameStarted) {
-      // Only one player left in an active game, end the game
-      console.log('Only one player remaining, ending game');
-      
-      this.broadcast({
-        type: 'game-end',
-        data: {
-          winner: connectedPlayers[0],
-          finalScores: [...this.players.values()]
-            .sort((a, b) => b.score - a.score)
-            .map(p => ({ username: p.username, score: p.score })),
-          reason: 'Only one player remaining'
-        },
-        timestamp: Date.now()
-      });
-      
-      // End the current round/game
-      if (this.roundTimer) {
-        clearInterval(this.roundTimer);
-        this.roundTimer = null;
-      }
-      
-      this.currentRound = null;
-      this.isGameActive = false;
-      
-      // Update global stats to reflect game has ended
-      this.updateGlobalStats();
-      
-      // Don't reset game entirely - let them start a new game if more players join
-      setTimeout(() => {
-        this.players.forEach(player => {
-          player.score = 0;
-        });
-        this.lastDrawerIndex = -1;
-        this.currentRoundNumber = 0;
-        this.gameStarted = false;
-      }, 10000); // Reset after 10 seconds
-    }
-  }
-
-  private endGame() {
-    // Find winner
-    const players = [...this.players.values()].sort((a, b) => b.score - a.score);
-    const winner = players[0];
-    
-    this.isGameActive = false;
-    this.currentRound = null;
-    
-    // Broadcast game end
-    this.broadcast({
-      type: 'game-end',
-      data: {
-        winner: winner,
-        finalScores: players.map(p => ({ username: p.username, score: p.score }))
-      },
-      timestamp: Date.now()
-    });
-    
-    // Update global stats to reflect game has ended
-    this.updateGlobalStats();
-    
-    // Reset for potential new game
-    setTimeout(() => {
-      this.players.forEach(player => {
-        player.score = 0;
-      });
-      this.lastDrawerIndex = -1;
-      this.currentRoundNumber = 0;
-    }, 10000); // Reset after 10 seconds
-  }
-
-  private async updateGlobalStats() {
-    try {
-      const env = this.env as any;
-      const globalStatsId = env.GLOBAL_STATS?.idFromName("global");
-      if (globalStatsId && this.roomId) {
-        const globalStats = env.GLOBAL_STATS.get(globalStatsId);
-        const statsData = {
-          roomId: this.roomId,
-          playerCount: this.players.size,
-          gameStarted: this.gameStarted
-        };
-        console.log(`Updating global stats for room ${this.roomId}:`, statsData);
-        await globalStats.fetch('http://localhost/update', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(statsData)
-        });
-      } else {
-        console.warn(`Cannot update global stats - globalStatsId: ${globalStatsId}, roomId: ${this.roomId}`);
-      }
-    } catch (error) {
-      console.warn('Failed to update global stats:', error);
-    }
-  }
-
-  private async unregisterFromGlobalStats() {
-    try {
-      const env = this.env as any;
-      const globalStatsId = env.GLOBAL_STATS?.idFromName("global");
-      if (globalStatsId) {
-        const globalStats = env.GLOBAL_STATS.get(globalStatsId);
-        await globalStats.fetch('http://localhost/unregister', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            roomId: this.roomId
-          })
-        });
-      }
-    } catch (error) {
-      console.warn('Failed to unregister from global stats:', error);
-    }
-  }
+import { DurableObject } from 'cloudflare:workers';
+import {
+	cleanChat,
+	cleanCustomWords,
+	cleanDrawOp,
+	cleanSettings,
+	cleanUsername,
+	DEFAULT_SETTINGS,
+	DRAWER_POINTS_PER_GUESS,
+	guesserPoints,
+	isCloseGuess,
+	isWordMatch,
+	letterIndices,
+	LIMITS,
+	maskWord,
+	maxHints,
+	normalizeGuess,
+	type DrawOp,
+	type Settings,
+} from '../game/logic';
+import { generateId, generateToken, pickRandom } from '../utils/id';
+import { pickWords, WORDS } from '../utils/words';
+
+// ---------------------------------------------------------------------------
+// Timings
+
+const CHOOSE_MS = 15_000;
+const INTERMISSION_MS = 5_000;
+/** How long a dropped player keeps their seat (and score) before being removed. */
+const RECONNECT_GRACE_MS = 30_000;
+/** Empty rooms delete their storage after this long. */
+const EMPTY_ROOM_TTL_MS = 10 * 60_000;
+/** Re-report to GlobalStats at least this often while the room has players. */
+const STATS_HEARTBEAT_MS = 5 * 60_000;
+
+// WebSocket close codes the client understands. 4xxx = do not auto-reconnect.
+export const CLOSE = {
+	invalidSession: 4001,
+	replaced: 4002,
+	kicked: 4003,
+	roomClosed: 4004,
+	left: 4005,
+} as const;
+
+// ---------------------------------------------------------------------------
+// Persisted state
+
+type Phase = 'lobby' | 'choosing' | 'drawing' | 'intermission';
+
+interface PlayerRec {
+	id: string;
+	token: string;
+	username: string;
+	score: number;
+	connected: boolean;
+	/** When a disconnected (or never-connected) player gets removed. */
+	leaveAt: number | null;
+	ipHash: string;
+}
+
+interface ScoreUpdate {
+	playerId: string;
+	username: string;
+	points: number;
+}
+
+interface RoundRec {
+	number: number;
+	drawerId: string;
+	choices: string[];
+	word: string | null;
+	durationMs: number;
+	guessed: string[];
+	scoreUpdates: ScoreUpdate[];
+	drawerPoints: number;
+	revealed: number[];
+	hintAt: number[];
+}
+
+interface ChatMsg {
+	id: string;
+	ts: number;
+	kind: 'chat' | 'system' | 'correct';
+	playerId?: string;
+	username?: string;
+	text: string;
+	/** Set for chat from players who already guessed: only drawer + guessers may see it. */
+	round?: number;
+}
+
+interface RoomState {
+	roomId: string;
+	createdAt: number;
+	ownerId: string | null;
+	phase: Phase;
+	settings: Settings;
+	customWords: string[] | null;
+	players: Record<string, PlayerRec>;
+	/** Join order. */
+	order: string[];
+	/** Remaining drawers in the current rotation. */
+	drawQueue: string[];
+	bannedIps: string[];
+	round: RoundRec | null;
+	roundNumber: number;
+	usedWords: string[];
+	deadline: number | null;
+	pausedAt: number | null;
+	chat: ChatMsg[];
+	lastRound: { word: string; drawerId: string; scoreUpdates: ScoreUpdate[]; drawerPoints: number } | null;
+	results: { id: string; finalScores: { id: string; username: string; score: number }[]; reason?: string } | null;
+	emptySince: number | null;
+	statsReportedAt: number;
+	statsKey: string;
+}
+
+interface Attachment {
+	playerId: string;
+}
+
+export type JoinResult =
+	| { ok: true; playerId: string; token: string; roomId: string }
+	| { ok: false; status: number; error: string };
+
+export interface RoomSummary {
+	exists: boolean;
+	phase?: Phase;
+	playerCount?: number;
+	maxPlayers: number;
+}
+
+// ---------------------------------------------------------------------------
+
+export class GameRoomObject extends DurableObject<Env> {
+	private state: RoomState | null;
+	/** In-memory only: resets on hibernation, which is fine for flood control. */
+	private buckets = new Map<string, { tokens: number; at: number }>();
+	private opCount: number | null = null;
+
+	constructor(ctx: DurableObjectState, env: Env) {
+		super(ctx, env);
+		// Synchronous KV API (SQLite-backed DOs): no await, no blockConcurrencyWhile needed.
+		this.state = ctx.storage.kv.get<RoomState>('state') ?? null;
+		// Only touch storage for rooms that exist, so probing random codes stays free.
+		if (this.state) this.ensureSchema();
+		// Keep-alive pings are answered without waking a hibernating object.
+		ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('ping', 'pong'));
+	}
+
+	private ensureSchema() {
+		this.ctx.storage.sql.exec(
+			'CREATE TABLE IF NOT EXISTS ops (seq INTEGER PRIMARY KEY AUTOINCREMENT, stroke INTEGER NOT NULL, data TEXT NOT NULL)',
+		);
+	}
+
+	// -------------------------------------------------------------------------
+	// RPC surface (called from the Worker)
+
+	async init(roomId: string): Promise<boolean> {
+		if (this.state) return false;
+		this.ensureSchema();
+		const now = Date.now();
+		this.state = {
+			roomId,
+			createdAt: now,
+			ownerId: null,
+			phase: 'lobby',
+			settings: { ...DEFAULT_SETTINGS },
+			customWords: null,
+			players: {},
+			order: [],
+			drawQueue: [],
+			bannedIps: [],
+			round: null,
+			roundNumber: 0,
+			usedWords: [],
+			deadline: null,
+			pausedAt: null,
+			chat: [],
+			lastRound: null,
+			results: null,
+			emptySince: now,
+			statsReportedAt: 0,
+			statsKey: '',
+		};
+		await this.commit();
+		return true;
+	}
+
+	async summary(): Promise<RoomSummary> {
+		const s = this.state;
+		if (!s) return { exists: false, maxPlayers: LIMITS.maxPlayers };
+		return { exists: true, phase: s.phase, playerCount: s.order.length, maxPlayers: LIMITS.maxPlayers };
+	}
+
+	async join(input: { username: unknown; token?: unknown; ipHash: string }): Promise<JoinResult> {
+		const s = this.state;
+		if (!s) return { ok: false, status: 404, error: 'Room not found. It may have expired.' };
+
+		const username = cleanUsername(input.username);
+		if (!username) return { ok: false, status: 400, error: 'Please pick a username.' };
+
+		const nameTaken = (exceptId?: string) =>
+			s.order.some((id) => id !== exceptId && normalizeGuess(s.players[id].username) === normalizeGuess(username));
+
+		// Rejoin with an existing session token (page refresh, network blip, shared link reopened).
+		if (typeof input.token === 'string') {
+			const existing = s.order.map((id) => s.players[id]).find((p) => p.token === input.token);
+			if (existing) {
+				if (existing.username !== username && !nameTaken(existing.id)) existing.username = username;
+				await this.commit();
+				return { ok: true, playerId: existing.id, token: existing.token, roomId: s.roomId };
+			}
+		}
+
+		if (s.bannedIps.includes(input.ipHash)) return { ok: false, status: 403, error: 'You were removed from this room.' };
+		if (s.order.length >= LIMITS.maxPlayers) return { ok: false, status: 409, error: 'Room is full.' };
+		if (nameTaken()) return { ok: false, status: 409, error: 'That username is taken in this room.' };
+
+		const player: PlayerRec = {
+			id: generateId(),
+			token: generateToken(),
+			username,
+			score: 0,
+			connected: false,
+			leaveAt: Date.now() + RECONNECT_GRACE_MS,
+			ipHash: input.ipHash,
+		};
+		s.players[player.id] = player;
+		s.order.push(player.id);
+		if (s.phase !== 'lobby') s.drawQueue.push(player.id);
+		s.ownerId ??= player.id;
+		s.emptySince = null;
+		this.system(`👋 ${username} joined`);
+		await this.commit();
+		this.broadcastState();
+		return { ok: true, playerId: player.id, token: player.token, roomId: s.roomId };
+	}
+
+	// -------------------------------------------------------------------------
+	// WebSocket (Hibernation API)
+
+	async fetch(request: Request): Promise<Response> {
+		if (request.headers.get('Upgrade') !== 'websocket') return new Response('Expected WebSocket', { status: 426 });
+
+		const { 0: client, 1: server } = new WebSocketPair();
+		const token = new URL(request.url).searchParams.get('token');
+		const s = this.state;
+		const player = s && token ? s.order.map((id) => s.players[id]).find((p) => p.token === token) : undefined;
+
+		this.ctx.acceptWebSocket(server, player ? [player.id] : []);
+		if (!s || !player) {
+			server.close(s ? CLOSE.invalidSession : CLOSE.roomClosed, s ? 'Session expired' : 'Room closed');
+			return new Response(null, { status: 101, webSocket: client });
+		}
+
+		// One live socket per player: a new tab replaces the old one.
+		for (const old of this.ctx.getWebSockets(player.id)) {
+			if (old !== server) this.safeClose(old, CLOSE.replaced, 'Opened in another tab');
+		}
+		server.serializeAttachment({ playerId: player.id } satisfies Attachment);
+
+		const wasConnected = player.connected;
+		player.connected = true;
+		player.leaveAt = null;
+		if (!wasConnected) this.broadcastState(player.id);
+		await this.commit();
+
+		server.send(
+			JSON.stringify({
+				type: 'welcome',
+				state: this.viewState(player.id),
+				chat: s.chat.filter((m) => this.canSee(m, player.id)),
+				ops: this.loadOps(),
+			}),
+		);
+		return new Response(null, { status: 101, webSocket: client });
+	}
+
+	async webSocketMessage(ws: WebSocket, raw: string | ArrayBuffer): Promise<void> {
+		const playerId = (ws.deserializeAttachment() as Attachment | null)?.playerId;
+		const s = this.state;
+		if (!playerId || !s?.players[playerId]) return this.safeClose(ws, CLOSE.invalidSession, 'Session expired');
+		if (typeof raw !== 'string' || raw.length > 64 * 1024) return;
+
+		let msg: Record<string, unknown>;
+		try {
+			msg = JSON.parse(raw);
+		} catch {
+			return;
+		}
+
+		switch (msg.type) {
+			case 'draw':
+				if (this.allow(`d:${playerId}`, 120, 60)) this.onDraw(playerId, msg.op);
+				return;
+			case 'chat':
+				if (this.allow(`c:${playerId}`, 6, 1)) await this.onChat(playerId, msg.text);
+				else this.send(ws, { type: 'notice', text: 'Slow down a little! 🐢' });
+				return;
+			case 'choose':
+				return this.onChoose(playerId, msg.index);
+			case 'start':
+				return this.onStart(ws, playerId, msg.settings, msg.words);
+			case 'pause':
+				return this.onPause(playerId);
+			case 'kick':
+				return this.onKick(playerId, msg.playerId);
+			case 'leave':
+				await this.removePlayer(playerId, 'left');
+				return this.safeClose(ws, CLOSE.left, 'Left room');
+		}
+	}
+
+	async webSocketClose(ws: WebSocket, code: number): Promise<void> {
+		await this.onSocketGone(ws);
+		this.safeClose(ws, code === 1005 || code === 1006 ? 1000 : code, 'Closing');
+	}
+
+	async webSocketError(ws: WebSocket): Promise<void> {
+		await this.onSocketGone(ws);
+	}
+
+	async alarm(): Promise<void> {
+		const s = this.state;
+		if (!s) return;
+		const now = Date.now();
+
+		for (const id of [...s.order]) {
+			const leaveAt = s.players[id]?.leaveAt;
+			if (leaveAt !== null && leaveAt !== undefined && leaveAt <= now) await this.removePlayer(id, 'timeout', false);
+		}
+
+		if (s.pausedAt === null && s.round && s.phase === 'drawing' && s.round.word) {
+			let revealed = false;
+			while (s.round.hintAt.length && s.round.hintAt[0] <= now) {
+				s.round.hintAt.shift();
+				this.revealLetter(s.round);
+				revealed = true;
+			}
+			if (revealed) this.broadcastState();
+		}
+
+		if (s.pausedAt === null && s.deadline !== null && s.deadline <= now) {
+			if (s.phase === 'choosing' && s.round) this.chooseWord(s.round, pickRandom(s.round.choices));
+			else if (s.phase === 'drawing') this.endRound('⏰ Time is up!');
+			else if (s.phase === 'intermission') this.nextRoundOrFinish();
+		}
+
+		if (s.order.length === 0 && s.emptySince !== null && now - s.emptySince >= EMPTY_ROOM_TTL_MS) {
+			return this.destroy();
+		}
+
+		await this.commit();
+	}
+
+	// -------------------------------------------------------------------------
+	// Message handlers
+
+	private onDraw(playerId: string, raw: unknown) {
+		const s = this.state!;
+		if (s.phase !== 'drawing' || s.pausedAt !== null || s.round?.drawerId !== playerId) return;
+		const op = cleanDrawOp(raw);
+		if (!op) return;
+
+		const sql = this.ctx.storage.sql;
+		if (op.k === 'clear') {
+			sql.exec('DELETE FROM ops');
+			this.opCount = 0;
+		} else if (op.k === 'undo') {
+			sql.exec('DELETE FROM ops WHERE stroke = (SELECT MAX(stroke) FROM ops)');
+			this.opCount = null;
+		} else {
+			this.opCount ??= sql.exec<{ n: number }>('SELECT COUNT(*) AS n FROM ops').one().n;
+			if (this.opCount >= LIMITS.maxOpsPerRound) return;
+			sql.exec('INSERT INTO ops (stroke, data) VALUES (?, ?)', op.s, JSON.stringify(op));
+			this.opCount++;
+		}
+		this.broadcastRaw(JSON.stringify({ type: 'draw', op }), playerId);
+	}
+
+	private async onChat(playerId: string, rawText: unknown) {
+		const s = this.state!;
+		const player = s.players[playerId];
+		const text = cleanChat(rawText);
+		if (!text) return;
+		const round = s.round;
+
+		// Outside of drawing, chat is just chat.
+		if (s.phase !== 'drawing' || !round?.word) {
+			this.pushChat({ id: generateId(), ts: Date.now(), kind: 'chat', playerId, username: player.username, text });
+			await this.commit();
+			return;
+		}
+
+		// The drawer and players who already guessed talk in a private channel so they can't leak the word.
+		if (round.drawerId === playerId || round.guessed.includes(playerId)) {
+			if (round.drawerId === playerId && normalizeGuess(text).includes(normalizeGuess(round.word))) {
+				this.sendTo(playerId, { type: 'notice', text: "Nice try! You can't say the word 🤫" });
+				return;
+			}
+			this.pushChat({ id: generateId(), ts: Date.now(), kind: 'chat', playerId, username: player.username, text, round: round.number });
+			await this.commit();
+			return;
+		}
+
+		if (isWordMatch(text, round.word)) {
+			const now = Date.now();
+			const remaining = Math.max(0, (s.deadline ?? now) - (s.pausedAt ?? now));
+			const points = guesserPoints(remaining, round.durationMs, round.guessed.length);
+			player.score += points;
+			const drawer = s.players[round.drawerId];
+			if (drawer) {
+				drawer.score += DRAWER_POINTS_PER_GUESS;
+				round.drawerPoints += DRAWER_POINTS_PER_GUESS;
+			}
+			round.guessed.push(playerId);
+			round.scoreUpdates.push({ playerId, username: player.username, points });
+			this.pushChat({ id: generateId(), ts: now, kind: 'correct', playerId, username: player.username, text: `${player.username} guessed the word! (+${points})` });
+			if (!this.maybeFinishRound()) this.broadcastState();
+			await this.commit();
+			return;
+		}
+
+		if (isCloseGuess(text, round.word)) this.sendTo(playerId, { type: 'notice', text: `"${text}" is close! 🔥` });
+		this.pushChat({ id: generateId(), ts: Date.now(), kind: 'chat', playerId, username: player.username, text });
+		await this.commit();
+	}
+
+	private async onChoose(playerId: string, index: unknown) {
+		const s = this.state!;
+		const round = s.round;
+		if (s.phase !== 'choosing' || !round || round.drawerId !== playerId || s.pausedAt !== null) return;
+		if (typeof index !== 'number' || !Number.isInteger(index) || !round.choices[index]) return;
+		this.chooseWord(round, round.choices[index]);
+		await this.commit();
+	}
+
+	private async onStart(ws: WebSocket, playerId: string, rawSettings: unknown, rawWords: unknown) {
+		const s = this.state!;
+		if (s.ownerId !== playerId) return this.send(ws, { type: 'notice', text: 'Only the room owner can start the game.' });
+		if (s.phase !== 'lobby') return;
+		const ready = s.order.filter((id) => s.players[id].connected);
+		if (ready.length < 2) return this.send(ws, { type: 'notice', text: 'You need at least 2 players to start.' });
+
+		s.settings = cleanSettings(rawSettings);
+		s.customWords = rawWords == null ? null : cleanCustomWords(rawWords);
+		if (rawWords != null && !s.customWords) {
+			return this.send(ws, { type: 'notice', text: `Custom word lists need at least ${LIMITS.customWordsMin} unique words.` });
+		}
+
+		for (const id of s.order) s.players[id].score = 0;
+		s.roundNumber = 0;
+		s.usedWords = [];
+		s.drawQueue = [...s.order];
+		s.results = null;
+		s.lastRound = null;
+		this.system('🚀 Game started! Good luck!');
+		this.startRound();
+		await this.commit();
+	}
+
+	private async onPause(playerId: string) {
+		const s = this.state!;
+		if (s.ownerId !== playerId || (s.phase !== 'drawing' && s.phase !== 'choosing')) return;
+		const now = Date.now();
+		if (s.pausedAt === null) {
+			s.pausedAt = now;
+			this.system('⏸️ Game paused');
+		} else {
+			// Shift every timer forward by however long we were paused.
+			const delta = now - s.pausedAt;
+			if (s.deadline !== null) s.deadline += delta;
+			if (s.round) s.round.hintAt = s.round.hintAt.map((t) => t + delta);
+			s.pausedAt = null;
+			this.system('▶️ Game resumed');
+		}
+		this.broadcastState();
+		await this.commit();
+	}
+
+	private async onKick(requesterId: string, targetId: unknown) {
+		const s = this.state!;
+		if (s.ownerId !== requesterId || typeof targetId !== 'string' || targetId === requesterId) return;
+		const target = s.players[targetId];
+		if (!target) return;
+		if (!s.bannedIps.includes(target.ipHash)) s.bannedIps.push(target.ipHash);
+		for (const ws of this.ctx.getWebSockets(targetId)) this.safeClose(ws, CLOSE.kicked, 'Removed by room owner');
+		await this.removePlayer(targetId, 'kicked');
+	}
+
+	private async onSocketGone(ws: WebSocket) {
+		const playerId = (ws.deserializeAttachment() as Attachment | null)?.playerId;
+		const s = this.state;
+		const player = playerId ? s?.players[playerId] : undefined;
+		if (!s || !player) return;
+		const stillOpen = this.ctx.getWebSockets(player.id).some((o) => o !== ws && o.readyState === WebSocket.OPEN);
+		if (stillOpen || !player.connected) return;
+		player.connected = false;
+		player.leaveAt = Date.now() + RECONNECT_GRACE_MS;
+		if (!this.maybeFinishRound()) this.broadcastState();
+		await this.commit();
+	}
+
+	// -------------------------------------------------------------------------
+	// Game flow
+
+	private startRound() {
+		const s = this.state!;
+		const connected = (id: string) => s.players[id]?.connected;
+		s.drawQueue = s.drawQueue.filter((id) => s.players[id]);
+		if (!s.drawQueue.some(connected)) s.drawQueue = [...s.order];
+		const drawerId = s.drawQueue.find(connected);
+		if (!drawerId || s.order.filter(connected).length < 2) return this.finishGame('Not enough players');
+		s.drawQueue = s.drawQueue.filter((id) => id !== drawerId);
+
+		const used = new Set(s.usedWords);
+		const choices = pickWords(s.customWords ?? WORDS, used, s.settings.wordChoiceCount);
+		s.usedWords = [...used];
+		s.roundNumber += 1;
+		s.round = {
+			number: s.roundNumber,
+			drawerId,
+			choices,
+			word: null,
+			durationMs: s.settings.roundDuration * 1000,
+			guessed: [],
+			scoreUpdates: [],
+			drawerPoints: 0,
+			revealed: [],
+			hintAt: [],
+		};
+		s.phase = 'choosing';
+		s.deadline = Date.now() + CHOOSE_MS;
+		s.pausedAt = null;
+		this.ctx.storage.sql.exec('DELETE FROM ops');
+		this.opCount = 0;
+		this.broadcastState();
+		this.reportStats(true);
+	}
+
+	private chooseWord(round: RoundRec, word: string) {
+		const s = this.state!;
+		const now = Date.now();
+		round.word = word;
+		s.usedWords.push(normalizeGuess(word));
+		const hints = maxHints(word);
+		round.hintAt = [0.5, 0.75].slice(0, hints).map((f) => now + round.durationMs * f);
+		s.phase = 'drawing';
+		s.deadline = now + round.durationMs;
+		this.broadcastState();
+	}
+
+	private revealLetter(round: RoundRec) {
+		const hidden = letterIndices(round.word!).filter((i) => !round.revealed.includes(i));
+		if (hidden.length > 1) round.revealed.push(pickRandom(hidden));
+	}
+
+	/** Ends the round early when every connected guesser has got it. Returns true if it ended. */
+	private maybeFinishRound(): boolean {
+		const s = this.state!;
+		const round = s.round;
+		if (s.phase !== 'drawing' || !round) return false;
+		const guessers = s.order.filter((id) => id !== round.drawerId && s.players[id].connected);
+		if (guessers.length > 0 && guessers.every((id) => round.guessed.includes(id))) {
+			this.endRound('🎉 Everyone guessed it!');
+			return true;
+		}
+		return false;
+	}
+
+	private endRound(reason: string) {
+		const s = this.state!;
+		const round = s.round;
+		if (!round) return;
+		const word = round.word ?? pickRandom(round.choices);
+		s.lastRound = { word, drawerId: round.drawerId, scoreUpdates: round.scoreUpdates, drawerPoints: round.drawerPoints };
+		s.round = null;
+		s.phase = 'intermission';
+		s.deadline = Date.now() + INTERMISSION_MS;
+		s.pausedAt = null;
+		this.system(`${reason} The word was "${word}".`);
+		this.broadcastState();
+	}
+
+	private nextRoundOrFinish() {
+		const s = this.state!;
+		if (s.roundNumber >= s.settings.maxRounds) this.finishGame();
+		else this.startRound();
+	}
+
+	private finishGame(reason?: string) {
+		const s = this.state!;
+		const finalScores = s.order
+			.map((id) => s.players[id])
+			.sort((a, b) => b.score - a.score)
+			.map((p) => ({ id: p.id, username: p.username, score: p.score }));
+		const hadGame = s.roundNumber > 0;
+		s.phase = 'lobby';
+		s.round = null;
+		s.deadline = null;
+		s.pausedAt = null;
+		s.drawQueue = [];
+		s.results = hadGame ? { id: generateId(), finalScores, reason } : null;
+		if (hadGame && finalScores[0]) this.system(reason ? `🏁 Game over: ${reason}.` : `🏆 ${finalScores[0].username} wins with ${finalScores[0].score} points!`);
+		this.broadcastState();
+		this.reportStats(true);
+	}
+
+	private async removePlayer(playerId: string, why: 'left' | 'kicked' | 'timeout', commit = true) {
+		const s = this.state!;
+		const player = s.players[playerId];
+		if (!player) return;
+		delete s.players[playerId];
+		s.order = s.order.filter((id) => id !== playerId);
+		s.drawQueue = s.drawQueue.filter((id) => id !== playerId);
+		this.buckets.delete(`c:${playerId}`);
+		this.buckets.delete(`d:${playerId}`);
+
+		const verb = why === 'kicked' ? 'was removed' : why === 'timeout' ? 'disconnected' : 'left';
+		this.system(`🚪 ${player.username} ${verb}`);
+
+		if (s.ownerId === playerId) {
+			s.ownerId = s.order.find((id) => s.players[id].connected) ?? s.order[0] ?? null;
+			if (s.ownerId) this.system(`👑 ${s.players[s.ownerId].username} is now the room owner`);
+		}
+
+		if (s.order.length === 0) {
+			s.emptySince = Date.now();
+			s.phase = 'lobby';
+			s.round = null;
+			s.deadline = null;
+			s.pausedAt = null;
+			this.reportStats(true);
+		} else if (s.phase !== 'lobby' && s.order.length < 2) {
+			this.finishGame('Not enough players');
+		} else if (s.round?.drawerId === playerId && (s.phase === 'drawing' || s.phase === 'choosing')) {
+			this.endRound(`🎨 ${player.username} left mid-drawing.`);
+		} else if (!this.maybeFinishRound()) {
+			this.broadcastState();
+		}
+		this.reportStats();
+		if (commit) await this.commit();
+	}
+
+	private async destroy() {
+		const roomId = this.state?.roomId;
+		for (const ws of this.ctx.getWebSockets()) this.safeClose(ws, CLOSE.roomClosed, 'Room closed');
+		this.state = null;
+		await this.ctx.storage.deleteAlarm();
+		await this.ctx.storage.deleteAll();
+		if (roomId) this.ctx.waitUntil(this.env.GLOBAL_STATS.getByName('global').remove(roomId).catch(() => {}));
+	}
+
+	// -------------------------------------------------------------------------
+	// Views
+
+	private viewState(viewerId: string) {
+		const s = this.state!;
+		const now = Date.now();
+		const round = s.round;
+		const isDrawer = round?.drawerId === viewerId;
+		const hasGuessed = !!round?.guessed.includes(viewerId);
+		const remaining = s.deadline === null ? null : Math.max(0, s.deadline - (s.pausedAt ?? now));
+
+		return {
+			you: { id: viewerId, isOwner: s.ownerId === viewerId },
+			roomId: s.roomId,
+			ownerId: s.ownerId,
+			phase: s.phase,
+			settings: s.settings,
+			roundNumber: s.roundNumber,
+			maxRounds: s.settings.maxRounds,
+			remaining,
+			paused: s.pausedAt !== null,
+			players: s.order.map((id) => {
+				const p = s.players[id];
+				return {
+					id,
+					username: p.username,
+					score: p.score,
+					connected: p.connected,
+					guessed: !!round?.guessed.includes(id),
+					isDrawer: round?.drawerId === id,
+				};
+			}),
+			round: round
+				? {
+						drawerId: round.drawerId,
+						hint: round.word ? maskWord(round.word, round.revealed) : null,
+						word: round.word && (isDrawer || hasGuessed) ? round.word : null,
+						choices: isDrawer && !round.word ? round.choices : null,
+						guessed: hasGuessed,
+					}
+				: null,
+			lastRound: s.phase === 'intermission' ? s.lastRound : null,
+			results: s.results,
+		};
+	}
+
+	private canSee(m: ChatMsg, viewerId: string): boolean {
+		const round = this.state?.round;
+		if (m.round === undefined || !round || m.round !== round.number) return true;
+		return round.drawerId === viewerId || round.guessed.includes(viewerId);
+	}
+
+	private loadOps(): DrawOp[] {
+		return this.ctx.storage.sql
+			.exec<{ data: string }>('SELECT data FROM ops ORDER BY seq')
+			.toArray()
+			.map((r) => JSON.parse(r.data));
+	}
+
+	// -------------------------------------------------------------------------
+	// Messaging
+
+	private system(text: string) {
+		this.pushChat({ id: generateId(), ts: Date.now(), kind: 'system', text });
+	}
+
+	private pushChat(msg: ChatMsg) {
+		const s = this.state!;
+		s.chat.push(msg);
+		if (s.chat.length > LIMITS.chatHistory) s.chat.splice(0, s.chat.length - LIMITS.chatHistory);
+		const payload = JSON.stringify({ type: 'chat', msg });
+		for (const ws of this.ctx.getWebSockets()) {
+			const id = (ws.deserializeAttachment() as Attachment | null)?.playerId;
+			if (id && this.canSee(msg, id)) this.sendRaw(ws, payload);
+		}
+	}
+
+	private broadcastState(exceptId?: string) {
+		for (const ws of this.ctx.getWebSockets()) {
+			const id = (ws.deserializeAttachment() as Attachment | null)?.playerId;
+			if (id && id !== exceptId && this.state?.players[id]) this.send(ws, { type: 'state', state: this.viewState(id) });
+		}
+	}
+
+	private broadcastRaw(payload: string, exceptId?: string) {
+		for (const ws of this.ctx.getWebSockets()) {
+			const id = (ws.deserializeAttachment() as Attachment | null)?.playerId;
+			if (id && id !== exceptId) this.sendRaw(ws, payload);
+		}
+	}
+
+	private sendTo(playerId: string, msg: unknown) {
+		for (const ws of this.ctx.getWebSockets(playerId)) this.send(ws, msg);
+	}
+
+	private send(ws: WebSocket, msg: unknown) {
+		this.sendRaw(ws, JSON.stringify(msg));
+	}
+
+	private sendRaw(ws: WebSocket, payload: string) {
+		try {
+			if (ws.readyState === WebSocket.OPEN) ws.send(payload);
+		} catch {
+			// Socket went away between the check and the send; close handler will tidy up.
+		}
+	}
+
+	private safeClose(ws: WebSocket, code: number, reason: string) {
+		try {
+			ws.close(code, reason);
+		} catch {
+			// Already closed.
+		}
+	}
+
+	/** Token bucket: `burst` messages, refilled at `perSecond`. */
+	private allow(key: string, burst: number, perSecond: number): boolean {
+		const now = Date.now();
+		const b = this.buckets.get(key) ?? { tokens: burst, at: now };
+		b.tokens = Math.min(burst, b.tokens + ((now - b.at) / 1000) * perSecond);
+		b.at = now;
+		const ok = b.tokens >= 1;
+		if (ok) b.tokens -= 1;
+		this.buckets.set(key, b);
+		return ok;
+	}
+
+	// -------------------------------------------------------------------------
+	// Persistence, alarms and stats
+
+	private async commit() {
+		const s = this.state;
+		if (!s) return;
+		if (s.order.length > 0 && Date.now() - s.statsReportedAt >= STATS_HEARTBEAT_MS) this.reportStats(true);
+		this.ctx.storage.kv.put('state', s);
+
+		const candidates: number[] = [];
+		if (s.pausedAt === null) {
+			if (s.deadline !== null) candidates.push(s.deadline);
+			if (s.round?.hintAt.length) candidates.push(s.round.hintAt[0]);
+		}
+		for (const id of s.order) {
+			const t = s.players[id].leaveAt;
+			if (t !== null) candidates.push(t);
+		}
+		if (s.emptySince !== null) candidates.push(s.emptySince + EMPTY_ROOM_TTL_MS);
+		if (s.order.length > 0) candidates.push(s.statsReportedAt + STATS_HEARTBEAT_MS);
+
+		const next = candidates.length ? Math.min(...candidates) : null;
+		const current = await this.ctx.storage.getAlarm();
+		if (next === null) {
+			if (current !== null) await this.ctx.storage.deleteAlarm();
+		} else if (current !== next) {
+			await this.ctx.storage.setAlarm(Math.max(next, Date.now() + 10));
+		}
+	}
+
+	private reportStats(force = false) {
+		const s = this.state;
+		if (!s || !s.roomId) return;
+		const key = `${s.order.length}|${s.phase === 'lobby' ? 0 : 1}`;
+		if (!force && key === s.statsKey) return;
+		s.statsKey = key;
+		s.statsReportedAt = Date.now();
+		const stub = this.env.GLOBAL_STATS.getByName('global');
+		const call =
+			s.order.length === 0
+				? stub.remove(s.roomId)
+				: stub.report({ roomId: s.roomId, playerCount: s.order.length, inGame: s.phase !== 'lobby' });
+		this.ctx.waitUntil(call.catch((err: unknown) => console.warn('stats report failed', err)));
+	}
 }
