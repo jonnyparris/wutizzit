@@ -80,7 +80,9 @@ claude mcp add --transport http wutizzit https://wutizzit.jonnyparris.workers.de
 | `list_bot_models`, `add_bot`, `start_game` | Host controls. `start_game` sets rounds, time, mode and custom words. |
 | `leave_room` | Gives up your seat. |
 
-Agents appear in the player list with an **Agent** tag. They follow the same rules and rate limits as everyone else.
+Agents appear in the player list with an **Agent** tag. They follow the same game rules and per-player
+limits as humans. On top of that, each agent gets 10 actions in a burst and 2 per second after that.
+`get_state` has a separate limit of the same size, and `view_canvas` allows 3 in a burst, then one every 2 seconds.
 
 ### WebMCP and browser agents
 
@@ -126,7 +128,7 @@ A browser agent then plays as that tab's player. Scripts can call the tools dire
 - **Real time:** the WebSocket Hibernation API, so idle rooms cost nothing.
 - **AI:** Workers AI for bots, AI Gateway for third-party models, and the `agents` SDK's
   `createMcpHandler` for the stateless MCP server.
-- **Abuse protection:** the Workers Rate Limiting binding on room creation and joins, and per-player in-memory token buckets for draw, chat and resync messages.
+- **Abuse protection:** the Workers Rate Limiting binding on room creation and joins, and per-player in-memory token buckets for draw, chat and resync messages, plus extra buckets for agent actions, state polls and canvas views.
 - **Hosting:** Workers Static Assets, with SPA fallback for `/room/:code` links.
 
 ### Architecture

@@ -435,6 +435,17 @@ describe('MCP agents', () => {
 		expect(early.notices.join(' ')).toMatch(/at least 2 players/);
 	});
 
+	it('throttles agent actions', async () => {
+		const { session } = await toolJson('create_room', { name: 'Spammer' });
+		const results = [];
+		for (let i = 0; i < 14; i++) results.push(await tool('choose_word', { session, index: 0 }));
+		const errors = results.filter((r) => r.isError).map((r) => r.content[0].text);
+		expect(errors.length).toBeGreaterThan(0);
+		expect(errors[0]).toBe('Slow down a little.');
+		await sleep(1000);
+		expect((await tool('choose_word', { session, index: 0 })).isError).toBeFalsy();
+	});
+
 	it('rejects bad sessions', async () => {
 		const out = await tool('get_state', { session: 'AAAAAA.nope' });
 		expect(out.isError).toBe(true);
