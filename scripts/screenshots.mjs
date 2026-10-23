@@ -46,7 +46,7 @@ try {
 	await alice.waitForTimeout(400);
 	await shot(alice, 'lobby.png');
 
-	// Round 1: the host (first to join) draws first.
+	// Round 1: turns follow seat order, and Alice took the first seat.
 	await alice.click('#start-game-btn');
 	await alice.waitForFunction(() => window.wutizzit.state.phase === 'choosing');
 	if (!(await alice.evaluate(() => window.wutizzit.state.round.drawerId === window.wutizzit.state.you.id))) throw new Error('expected Alice to draw first');
