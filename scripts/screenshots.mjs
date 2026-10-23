@@ -114,6 +114,7 @@ try {
 	await say(bob, 'nice sun');
 	await alice.waitForTimeout(600);
 
+	await alice.evaluate(() => scrollTo(0, 0));
 	await cara.evaluate(() => scrollTo(0, 0));
 	await shot(cara, 'guessing-mobile.jpg', { type: 'jpeg', quality: 80 });
 
