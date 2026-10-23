@@ -391,13 +391,14 @@ export class GameRoomObject extends DurableObject<Env> {
 	}
 
 	/** The agent's view of the game. With `since`, waits up to `waitMs` for something to change first. */
-	async agentView(token: string, opts: { since?: number; waitMs?: number } = {}): Promise<AgentView | { error: string }> {
+	/** `limited`: the get_state tool, which agents may call in a loop. Views returned after an action aren't limited. */
+	async agentView(token: string, opts: { since?: number; waitMs?: number; limited?: boolean } = {}): Promise<AgentView | { error: string }> {
 		let p = this.agentByToken(token);
 		if (!p) return { error: 'Session expired or room closed. Join again.' };
 		const wait = Math.max(0, Math.min(AGENT_WAIT_MAX_MS, Number(opts.waitMs) || 0));
 		// Waiting without a version means "until something changes from now".
 		const since = typeof opts.since === 'number' ? opts.since : wait > 0 ? this.state!.version : undefined;
-		if (!this.allow(`g:${p.id}`, 10, 2)) return { error: 'Slow down: use wait_seconds instead of polling get_state in a tight loop.' };
+		if (opts.limited && !this.allow(`g:${p.id}`, 10, 2)) return { error: 'Slow down: use wait_seconds instead of polling get_state in a tight loop.' };
 		if (typeof since === 'number' && wait > 0 && this.state!.version <= since && !this.notices.get(p.id)?.length) {
 			await new Promise<void>((resolve) => {
 				const done = () => {
@@ -1199,6 +1200,7 @@ export class GameRoomObject extends DurableObject<Env> {
 		s.deadline = Date.now() + CHOOSE_MS;
 		s.pausedAt = null;
 		this.ctx.storage.sql.exec('DELETE FROM ops');
+		this.opsRev++;
 		this.opCount = 0;
 		this.canvasFullNotified = false;
 		this.resyncPending.clear();
@@ -1301,6 +1303,9 @@ export class GameRoomObject extends DurableObject<Env> {
 		this.buckets.delete(`d:${playerId}`);
 		this.buckets.delete(`r:${playerId}`);
 		this.buckets.delete(`s:${playerId}`);
+		this.buckets.delete(`u:${playerId}`);
+		this.buckets.delete(`g:${playerId}`);
+		this.buckets.delete(`v:${playerId}`);
 		this.resyncPending.delete(playerId);
 		this.notices.delete(playerId);
 		delete s.bots[playerId];

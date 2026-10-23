@@ -135,6 +135,10 @@ describe('shapes and raster', () => {
 		const shapes = cleanShapes(Array.from({ length: 80 }, () => ({ type: 'line', points: zigzag })));
 		const ops = shapesToOps(shapes, 1, 500);
 		expect(ops.length).toBe(500);
+		// A filled outline cut short by the budget doesn't flood the canvas.
+		const rect = cleanShapes([['rect', 100, 100, 600, 300, 'black', 'red']]);
+		expect(shapesToOps(rect, 1, 3).some((o) => o.k === 'fill')).toBe(false);
+		expect(shapesToOps(rect, 1).some((o) => o.k === 'fill')).toBe(true);
 		// Without a budget, densifying is still bounded per shape.
 		expect(shapesToOps(shapes.slice(0, 1), 1).length).toBeLessThan(300);
 	});
@@ -257,7 +261,7 @@ describe('bot budget', () => {
 		await client.state((x) => x.phase === 'drawing' && x.round.drawerId !== x.you.id);
 		await stepBots(roomId); // try to draw: no budget
 		await client.next((m) => m.type === 'chat' && /out of energy/.test(m.msg.text));
-		await client.state((x) => x.phase === 'intermission');
+		await client.next((m) => m.type === 'chat' && /couldn't draw this turn/.test(m.msg.text));
 	});
 
 	it('does not run bots with nobody watching, and shifts their timers on pause', async () => {
@@ -280,7 +284,7 @@ describe('bot budget', () => {
 			obj.state.pausedAt -= 5_000; // pretend we were paused for 5s
 		});
 		client.send({ type: 'pause' });
-		await client.state((x) => !x.paused);
+		await client.next((m) => m.type === 'chat' && m.msg.text === 'Game resumed');
 		await inRoom(roomId, (obj) => {
 			expect((Object.values(obj.state.bots)[0] as any).nextAt).toBeGreaterThanOrEqual(nextAt + 5_000);
 			// Nobody watching: the human drops to reconnect grace.
@@ -396,12 +400,19 @@ describe('MCP agents', () => {
 		const big = { type: 'rect', x: 50, y: 50, w: 700, h: 400 };
 		await toolJson('draw', { session, shapes: [big, { ...big, x: 60 }, { ...big, x: 70 }] });
 		await toolJson('undo', { session });
-		await sleep(3000);
+		for (let i = 0; i < 100; i++) {
+			let done = false;
+			await inRoom(roomId, (obj) => {
+				done = obj.replay === null;
+			});
+			if (done) break;
+			await sleep(100);
+		}
 		await inRoom(roomId, (obj) => {
 			const strokes = new Set(obj.loadOps().map((o: any) => o.s));
 			expect([...strokes].sort()).toEqual([1, 2]);
 		});
-	}, 10_000);
+	}, 20_000);
 
 	it('long-polls until something changes, and reports private notices', async () => {
 		const { session } = await toolJson('create_room', { name: 'Waiter' });

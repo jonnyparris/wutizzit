@@ -176,11 +176,13 @@ export function cleanShapes(raw: unknown): Shape[] {
 	return out;
 }
 
+const MAX_DENSE_POINTS = 2000;
+
 function densify(points: Point[], step: number = SHAPE_LIMITS.step): Point[] {
 	if (points.length < 2) return points;
 	const out: Point[] = [points[0]];
-	// Two full-length diagonals' worth: plenty for any real shape, bounded for zig-zag spam.
-	for (let i = 1; i < points.length && out.length < 2000; i++) {
+	// ~12,000px of outline: plenty for any real shape, bounded for zig-zag spam.
+	for (let i = 1; i < points.length && out.length < MAX_DENSE_POINTS; i++) {
 		const [ax, ay] = points[i - 1];
 		const [bx, by] = points[i];
 		const n = Math.max(1, Math.ceil(Math.hypot(bx - ax, by - ay) / step));
@@ -210,19 +212,22 @@ export function shapesToOps(shapes: readonly Shape[], firstStrokeId: number, max
 	// Stops early once `maxOps` is reached, so a huge request can't build a huge array.
 	const full = () => ops.length >= maxOps;
 	let s = firstStrokeId;
-	const stroke = (pts: Point[], color: string, width: number) => {
-		if (full()) return;
+	/** False if the outline was cut short (op budget or point cap), so a fill would leak out of it. */
+	const stroke = (pts: Point[], color: string, width: number): boolean => {
+		if (full()) return false;
 		const dense = densify(pts);
 		if (dense.length === 1) {
 			ops.push({ k: 'line', s, c: color, w: Math.round(width), p: [round1(dense[0][0]), round1(dense[0][1])] });
-			return;
+			return true;
 		}
 		const size = SHAPE_LIMITS.chunkPoints;
 		for (let i = 0; i < dense.length - 1 && !full(); i += size - 1) {
 			const part = dense.slice(i, i + size);
 			if (part.length < 2) break;
 			ops.push({ k: 'line', s, c: color, w: Math.round(width), p: part.flatMap(([x, y]) => [round1(x), round1(y)]) });
+			if (i + size >= dense.length) return dense.length < MAX_DENSE_POINTS;
 		}
+		return false;
 	};
 	const fillAt = ([x, y]: Point, color: string) => {
 		if (full()) return;
@@ -240,21 +245,17 @@ export function shapesToOps(shapes: readonly Shape[], firstStrokeId: number, max
 				stroke(sh.closed ? [...sh.points, sh.points[0]] : sh.points, color, width);
 				break;
 			case 'polygon':
-				stroke([...sh.points, sh.points[0]], color, width);
-				if (sh.fill) fillAt(centroid(sh.points), sh.fill);
+				if (stroke([...sh.points, sh.points[0]], color, width) && sh.fill) fillAt(centroid(sh.points), sh.fill);
 				break;
 			case 'circle':
-				stroke(ellipsePoints(sh.cx, sh.cy, sh.r, sh.r), color, width);
-				if (sh.fill) fillAt([sh.cx, sh.cy], sh.fill);
+				if (stroke(ellipsePoints(sh.cx, sh.cy, sh.r, sh.r), color, width) && sh.fill) fillAt([sh.cx, sh.cy], sh.fill);
 				break;
 			case 'ellipse':
-				stroke(ellipsePoints(sh.cx, sh.cy, sh.rx, sh.ry), color, width);
-				if (sh.fill) fillAt([sh.cx, sh.cy], sh.fill);
+				if (stroke(ellipsePoints(sh.cx, sh.cy, sh.rx, sh.ry), color, width) && sh.fill) fillAt([sh.cx, sh.cy], sh.fill);
 				break;
 			case 'rect': {
 				const { x, y, w, h } = sh;
-				stroke([[x, y], [x + w, y], [x + w, y + h], [x, y + h], [x, y]], color, width);
-				if (sh.fill) fillAt([x + w / 2, y + h / 2], sh.fill);
+				if (stroke([[x, y], [x + w, y], [x + w, y + h], [x, y + h], [x, y]], color, width) && sh.fill) fillAt([x + w / 2, y + h / 2], sh.fill);
 				break;
 			}
 			case 'fill':
