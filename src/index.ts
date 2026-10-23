@@ -1,4 +1,6 @@
-import { generateRoomId, ROOM_ID_PATTERN, sha256Hex } from './utils/id';
+import { BOT_MODELS, DEFAULT_BOT_MODEL } from './bots/brain';
+import { allocateRoom, handleMcp } from './mcp';
+import { ROOM_ID_PATTERN, sha256Hex } from './utils/id';
 
 export { GameRoomObject } from './durable-objects/GameRoom';
 export { GlobalStatsObject } from './durable-objects/GlobalStats';
@@ -25,12 +27,8 @@ async function createRoom(request: Request, env: Env): Promise<Response> {
 	const { success } = await env.CREATE_LIMITER.limit({ key: clientIp(request) });
 	if (!success) return json({ error: 'Too many rooms created. Try again in a minute.' }, 429);
 
-	// 31^6 ≈ 887M codes; a collision is unlikely but cheap to retry.
-	for (let attempt = 0; attempt < 5; attempt++) {
-		const roomId = generateRoomId();
-		if (await env.GAME_ROOM.getByName(roomId).init(roomId)) return json({ roomId }, 201);
-	}
-	return json({ error: 'Could not allocate a room. Please retry.' }, 503);
+	const roomId = await allocateRoom(env);
+	return roomId ? json({ roomId }, 201) : json({ error: 'Could not allocate a room. Please retry.' }, 503);
 }
 
 async function joinRoom(request: Request, env: Env, roomId: string): Promise<Response> {
@@ -71,7 +69,11 @@ export default {
 		const method = request.method;
 
 		try {
+			if (pathname === '/mcp') return await handleMcp(request, env, ctx);
 			if (pathname === '/api/lobby' && method === 'GET') return await lobby(request, env, ctx);
+			if (pathname === '/api/bot-models' && method === 'GET') {
+				return json({ default: DEFAULT_BOT_MODEL, models: BOT_MODELS.map(({ id, label, paid }) => ({ id, label, paid })) }, 200, { 'Cache-Control': 'public, max-age=300' });
+			}
 			if (pathname === '/rooms' && method === 'POST') return await createRoom(request, env);
 
 			const match = pathname.match(/^\/rooms\/([^/]+)(?:\/(join|ws))?$/);

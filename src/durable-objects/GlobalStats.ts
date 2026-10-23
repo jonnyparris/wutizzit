@@ -70,6 +70,22 @@ export class GlobalStatsObject extends DurableObject<Env> {
 		};
 	}
 
+	/**
+	 * Daily AI call budget across all rooms, so a busy (or abusive) day can't run up a bill.
+	 * Returns false once today's allowance for that kind of model is spent. Resets at 00:00 UTC.
+	 */
+	async spendAi(paid: boolean): Promise<boolean> {
+		const day = new Date().toISOString().slice(0, 10);
+		const budget = this.ctx.storage.kv.get<{ day: string; free: number; paid: number }>('ai') ?? { day, free: 0, paid: 0 };
+		if (budget.day !== day) Object.assign(budget, { day, free: 0, paid: 0 });
+		const limit = Number(paid ? this.env.AI_DAILY_PAID_CALLS : this.env.AI_DAILY_FREE_CALLS) || (paid ? 1500 : 20000);
+		const key = paid ? 'paid' : 'free';
+		if (budget[key] >= limit) return false;
+		budget[key]++;
+		this.ctx.storage.kv.put('ai', budget);
+		return true;
+	}
+
 	private persist() {
 		this.ctx.storage.kv.put('rooms', [...this.rooms]);
 	}

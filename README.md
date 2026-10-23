@@ -34,6 +34,57 @@ It runs entirely on Cloudflare Workers and Durable Objects.
   </tr>
 </table>
 
+## Play with AI
+
+There are three ways to bring AI into a game: bots the host adds, agents that join over MCP, and
+agents that drive the web page.
+
+### Bots
+
+In the lobby, the host clicks **Add bot** and picks a model. A room can have up to 4 bots.
+
+- **Guessing:** every 7 to 11 seconds, a bot looks at a PNG of the canvas (rendered on the server)
+  with a vision model and types a guess. The bot sees the letter hint and the guesses already made.
+- **Drawing:** on its turn, a bot picks a word and plans the picture as shapes. The plan streams in,
+  and the strokes replay over about 14 seconds so that everyone can watch it being drawn.
+- **Models:**
+  - Workers AI models see with Mistral Small 3.1, Llama 4 Scout or Llama 3.2 Vision. They all draw
+    with gpt-oss-120b, because it draws much better and its first shape arrives in about 1.5 seconds.
+  - GPT-5.4 mini, Claude Haiku 4.5 and Gemini 2.5 Flash run through AI Gateway and do both jobs.
+- **Limits:** a daily budget caps AI calls across all rooms. The defaults are 20,000 Workers AI calls
+  and 1,500 third-party calls (`AI_DAILY_FREE_CALLS` and `AI_DAILY_PAID_CALLS` in `wrangler.jsonc`).
+  When a bot runs out, it sits out.
+
+**Modes:** the host can choose free-for-all, **Teams** (humans and bots mixed across two teams) or
+**Humans vs AI**. In team modes, the drawer alternates between teams and team scores add up.
+
+### MCP agents
+
+`https://wutizzit.jonnyparris.workers.dev/mcp` is a remote MCP server (Streamable HTTP, no auth).
+Any MCP client can use it to create or join a room and play next to humans and bots.
+
+```bash
+claude mcp add --transport http wutizzit https://wutizzit.jonnyparris.workers.dev/mcp
+```
+
+| Tool | What it does |
+|------|--------------|
+| `create_room`, `join_room` | Get a `session` to pass to the other tools, and a link to share with humans. |
+| `get_state` | Shows the phase, your role, the word or hint, players and chat, and a `next` suggestion. With `wait_seconds`, it long-polls until something changes. |
+| `view_canvas` | Returns the drawing as a PNG image. |
+| `guess` | Sends a guess or a chat message. |
+| `choose_word`, `draw`, `undo` | For your turn. `draw` takes lines, polygons, circles, ellipses, rects and fills. |
+| `list_bot_models`, `add_bot`, `start_game` | Host controls. `start_game` sets rounds, time, mode and custom words. |
+| `leave_room` | Gives up your seat. |
+
+Agents appear in the player list with an **Agent** tag. They follow the same rules and rate limits as everyone else.
+
+### WebMCP and browser agents
+
+The page registers the same tools with `navigator.modelContext` (WebMCP) when the browser supports it.
+A browser agent then plays as that tab's player. Scripts can call the tools directly, for example
+`await window.wutizzit.agent.draw({ shapes: [...] })`. The tool list is in `window.wutizzit.agent.tools`.
+
 ## Features
 
 **Game**
@@ -70,6 +121,8 @@ It runs entirely on Cloudflare Workers and Durable Objects.
 - **Frontend:** vanilla JavaScript, HTML5 Canvas, Tailwind CSS v4 compiled at build time.
 - **Backend:** a Cloudflare Worker plus SQLite-backed Durable Objects, using RPC and alarms.
 - **Real time:** the WebSocket Hibernation API, so idle rooms cost nothing.
+- **AI:** Workers AI for bots, AI Gateway for third-party models, and the `agents` SDK's
+  `createMcpHandler` for the stateless MCP server.
 - **Abuse protection:** the Workers Rate Limiting binding on room creation and joins, and per-player in-memory token buckets for draw, chat and resync messages.
 - **Hosting:** Workers Static Assets, with SPA fallback for `/room/:code` links.
 
@@ -80,11 +133,14 @@ Browser ──HTTP──▶ Worker (src/index.ts)
   │                 ├─ POST /rooms            → GameRoom.init()        (rate limited)
   │                 ├─ POST /rooms/:code/join → GameRoom.join()        (rate limited, returns secret token)
   │                 ├─ GET  /rooms/:code      → GameRoom.summary()
+  │                 ├─ POST /mcp              → MCP server → GameRoom.agentAct() / agentView() (long-poll) / agentCanvas()
+  │                 ├─ GET  /api/bot-models   → models the host can pick for bots
   │                 └─ GET  /api/lobby        → GlobalStats.snapshot() (edge-cached 3s)
   └──WebSocket──▶ /rooms/:code/ws  → GameRoom (hibernating; token sent in Sec-WebSocket-Protocol)
                      state:  ctx.storage.kv   (sync KV API)
                      canvas: ctx.storage.sql  (ops table, replayed on join)
-                     timers: one alarm for round deadlines, hints, reconnect grace, idle cleanup
+                     timers: one alarm for round deadlines, hints, bot turns, reconnect grace, idle cleanup
+                     bots:   alarm → Workers AI / AI Gateway (vision guesses, streamed shape plans)
 ```
 
 - Each player has a public `id`, which everyone sees, and a secret `token`, which only they hold.
@@ -101,7 +157,7 @@ Browser ──HTTP──▶ Worker (src/index.ts)
 ```bash
 npm install
 npm run dev        # wrangler dev (builds Tailwind first). Run `npm run dev:css` alongside to watch CSS.
-npm test           # Vitest inside the Workers runtime (@cloudflare/vitest-plugin)
+npm test           # Vitest inside the Workers runtime (@cloudflare/vitest-plugin). Bots use a fake model.
 npm run typecheck
 BASE_URL=http://localhost:8787 npm run test:e2e            # browser end-to-end tests
 BASE_URL=http://localhost:8787 node scripts/screenshots.mjs # regenerate docs/screenshots
@@ -121,6 +177,10 @@ Run `npm run cf-typegen` after you change `wrangler.jsonc`.
 │   ├── index.ts               # Worker router
 │   ├── durable-objects/       # GameRoom (game logic) and GlobalStats (home page directory)
 │   ├── game/logic.ts          # Pure helpers: matching, hints, scoring, validation
+│   ├── game/shapes.ts         # Shapes (from bots and agents) → draw ops
+│   ├── game/raster.ts         # Server-side canvas → PNG, for bots and view_canvas
+│   ├── bots/brain.ts          # Model list, prompts, vision guessing, streamed drawing plans
+│   ├── mcp.ts                 # Remote MCP server for agents
 │   ├── client/styles.css      # Tailwind source → public/styles.css
 │   └── utils/                 # IDs, word list
 ├── public/                    # index.html, game.js, favicon, _headers (CSP and security headers)
@@ -132,8 +192,9 @@ Run `npm run cf-typegen` after you change `wrangler.jsonc`.
 
 ## Deployment
 
-Run `npm run deploy`. You don't need any secrets or extra resources. The Durable Objects and rate
-limiters are declared in `wrangler.jsonc`.
+Run `npm run deploy`. You don't need any secrets. The Durable Objects, rate limiters and the AI
+binding are declared in `wrangler.jsonc`. Third-party bot models go through the `default` AI
+Gateway with unified billing, so they need credits on the account. Workers AI models don't.
 
 ## License
 

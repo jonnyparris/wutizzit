@@ -140,13 +140,19 @@ export function cleanCustomWords(raw: unknown): string[] | null {
 	return words.length >= LIMITS.customWordsMin ? words : null;
 }
 
+export type GameMode = 'ffa' | 'teams';
+/** How teams are formed: mixed (balanced, humans and AI on both sides) or humans against the AI players. */
+export type TeamSplit = 'mixed' | 'humans-vs-ai';
+
 export interface Settings {
 	maxRounds: number;
 	roundDuration: number;
 	wordChoiceCount: number;
+	mode: GameMode;
+	teamSplit: TeamSplit;
 }
 
-export const DEFAULT_SETTINGS: Settings = { maxRounds: 10, roundDuration: 60, wordChoiceCount: 3 };
+export const DEFAULT_SETTINGS: Settings = { maxRounds: 10, roundDuration: 60, wordChoiceCount: 3, mode: 'ffa', teamSplit: 'mixed' };
 
 export function cleanSettings(raw: unknown): Settings {
 	const r = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
@@ -158,6 +164,8 @@ export function cleanSettings(raw: unknown): Settings {
 		maxRounds: rounds >= LIMITS.minRounds && rounds <= LIMITS.maxRounds ? rounds : DEFAULT_SETTINGS.maxRounds,
 		roundDuration: LIMITS.durations.includes(duration) ? duration : DEFAULT_SETTINGS.roundDuration,
 		wordChoiceCount: choices >= LIMITS.minChoices && choices <= LIMITS.maxChoices ? choices : DEFAULT_SETTINGS.wordChoiceCount,
+		mode: r.mode === 'teams' ? 'teams' : 'ffa',
+		teamSplit: r.teamSplit === 'humans-vs-ai' ? 'humans-vs-ai' : 'mixed',
 	};
 }
 

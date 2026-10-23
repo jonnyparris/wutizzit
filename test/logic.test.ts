@@ -75,15 +75,19 @@ describe('input cleaning', () => {
 	});
 
 	it('falls back to defaults for bad settings', () => {
-		expect(cleanSettings({ maxRounds: 4, roundDuration: 90, wordChoiceCount: 5 })).toEqual({
+		expect(cleanSettings({ maxRounds: 4, roundDuration: 90, wordChoiceCount: 5, mode: 'teams', teamSplit: 'humans-vs-ai' })).toEqual({
 			maxRounds: 4,
 			roundDuration: 90,
 			wordChoiceCount: 5,
+			mode: 'teams',
+			teamSplit: 'humans-vs-ai',
 		});
-		expect(cleanSettings({ maxRounds: 999, roundDuration: 7, wordChoiceCount: 'x' })).toEqual({
+		expect(cleanSettings({ maxRounds: 999, roundDuration: 7, wordChoiceCount: 'x', mode: 'battle' })).toEqual({
 			maxRounds: 10,
 			roundDuration: 60,
 			wordChoiceCount: 3,
+			mode: 'ffa',
+			teamSplit: 'mixed',
 		});
 	});
 

@@ -21,6 +21,9 @@ import {
 } from '../game/logic';
 import { generateId, generateToken, pickRandom } from '../utils/id';
 import { pickWords, WORDS } from '../utils/words';
+import { opsToPngBase64, visibleOps } from '../game/raster';
+import { cleanShapes, shapesToOps } from '../game/shapes';
+import { BOT_MODELS, createBrain, DEFAULT_BOT_MODEL, findModel, type Brain, type BotModel } from '../bots/brain';
 
 // ---------------------------------------------------------------------------
 // Timings
@@ -37,6 +40,26 @@ const BAN_MS = 10 * 60_000;
 const EMPTY_ROOM_TTL_MS = 10 * 60_000;
 /** Re-report to GlobalStats at least this often while the room has players. */
 const STATS_HEARTBEAT_MS = 5 * 60_000;
+
+// Bots and agents
+/** An MCP agent that makes no calls for this long loses its seat. */
+const AGENT_IDLE_MS = 120_000;
+/** Long-poll ceiling for agents waiting on state changes. */
+const AGENT_WAIT_MAX_MS = 25_000;
+const MAX_BOTS = 4;
+const BOT_MAX_GUESSES = 8;
+/** Bots take their first look this long after drawing starts, then guess every few seconds. */
+const BOT_FIRST_LOOK_MS = [5_000, 8_000] as const;
+const BOT_GUESS_EVERY_MS = [7_000, 11_000] as const;
+const BOT_CHOOSE_MS = 1_500;
+/** Shape drawings are replayed over roughly this long so everyone watches them appear. */
+const REPLAY_TARGET_MS = 14_000;
+const REPLAY_TICK_MS = 40;
+
+export const TEAM_NAMES = { A: 'Team Violet', B: 'Team Coral' } as const;
+type Team = keyof typeof TEAM_NAMES;
+
+const between = ([lo, hi]: readonly [number, number]) => lo + Math.random() * (hi - lo);
 
 export const WS_PROTOCOL = 'wutizzit';
 
@@ -65,6 +88,20 @@ interface PlayerRec {
 	ipHash: string;
 	/** False until the first WebSocket connects; "joined" is announced then. */
 	seen: boolean;
+	/** Humans play in the browser; bots are run by this room; agents call in over MCP. Absent = human. */
+	kind?: 'human' | 'bot' | 'agent';
+	/** Bot model id (bots only). */
+	model?: string;
+	team?: Team | null;
+}
+
+interface BotRec {
+	round: number;
+	nextAt: number | null;
+	guesses: number;
+	planned: boolean;
+	tried: string[];
+	outOfBudget: boolean;
 }
 
 interface ScoreUpdate {
@@ -84,6 +121,8 @@ interface RoundRec {
 	drawerPoints: number;
 	revealed: number[];
 	hintAt: number[];
+	/** When drawing started (word chosen). */
+	drawStartedAt?: number;
 }
 
 interface ChatMsg {
@@ -118,10 +157,18 @@ interface RoomState {
 	pausedAt: number | null;
 	chat: ChatMsg[];
 	lastRound: { word: string; drawerId: string; scoreUpdates: ScoreUpdate[]; drawerPoints: number } | null;
-	results: { id: string; finalScores: { id: string; username: string; score: number }[]; reason?: string } | null;
+	results: {
+		id: string;
+		finalScores: { id: string; username: string; score: number }[];
+		reason?: string;
+		teams?: { team: Team; name: string; score: number }[];
+	} | null;
 	emptySince: number | null;
 	statsReportedAt: number;
 	statsKey: string;
+	/** Bumped on every state or chat change; agents long-poll on it. */
+	version: number;
+	bots: Record<string, BotRec>;
 }
 
 interface Attachment {
@@ -139,6 +186,31 @@ export interface RoomSummary {
 	maxPlayers: number;
 }
 
+/** Compact, LLM-friendly game state for MCP agents. */
+export interface AgentView {
+	version: number;
+	roomId: string;
+	link: string | null;
+	you: { id: string; name: string; isHost: boolean; team: string | null; score: number };
+	phase: Phase;
+	paused: boolean;
+	round: { number: number; of: number } | null;
+	timeLeftSeconds: number | null;
+	role: 'drawer' | 'guesser' | 'none';
+	word: string | null;
+	choices: string[] | null;
+	hint: string | null;
+	youGuessed: boolean;
+	canvasStrokes: number;
+	players: { name: string; kind: string; score: number; team: string | null; drawing: boolean; guessed: boolean; connected: boolean }[];
+	teams: { team: string; name: string; score: number }[] | null;
+	chat: { from: string; text: string; kind: string }[];
+	lastRound: { word: string; drawer: string | null; drawerPoints: number; points: { name: string; points: number }[] } | null;
+	results: { finalScores: { name: string; score: number }[]; teams: { team: string; name: string; score: number }[] | null } | null;
+	notices: string[];
+	next: string;
+}
+
 // ---------------------------------------------------------------------------
 
 export class GameRoomObject extends DurableObject<Env> {
@@ -150,14 +222,29 @@ export class GameRoomObject extends DurableObject<Env> {
 	private resyncPending = new Set<string>();
 	/** Set once the "canvas full" resync went out, so a drawer hammering a full canvas gets it once. */
 	private canvasFullNotified = false;
+	/** Replaced in tests with a fake. */
+	brain: Brain;
+	/** Bots waiting on a model call (shown as "Thinking"). */
+	private botBusy = new Set<string>();
+	/** Agents long-polling for a change. */
+	private waiters: (() => void)[] = [];
+	/** Private notices for agents (they have no socket), returned with their next call. */
+	private notices = new Map<string, string[]>();
+	/** Shape drawing being replayed onto the canvas a few ops at a time. */
+	private replay: { playerId: string; round: number; ops: DrawOp[]; perTick: number } | null = null;
+	private replayTimer: ReturnType<typeof setTimeout> | null = null;
 
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
+		this.brain = createBrain(env);
 		// Synchronous KV API (SQLite-backed DOs): no await, no blockConcurrencyWhile needed.
 		this.state = ctx.storage.kv.get<RoomState>('state') ?? null;
 		if (this.state) {
 			// Defensive backfill in case a room was persisted by an earlier schema.
 			this.state.bans ??= {};
+			this.state.version ??= 0;
+			this.state.bots ??= {};
+			this.state.settings = { ...DEFAULT_SETTINGS, ...this.state.settings };
 			for (const p of Object.values(this.state.players)) p.seen ??= true;
 		}
 		// Only touch storage for rooms that exist, so probing random codes stays free.
@@ -201,6 +288,8 @@ export class GameRoomObject extends DurableObject<Env> {
 			emptySince: now,
 			statsReportedAt: 0,
 			statsKey: '',
+			version: 0,
+			bots: {},
 		};
 		await this.commit();
 		return true;
@@ -212,7 +301,8 @@ export class GameRoomObject extends DurableObject<Env> {
 		return { exists: true, phase: s.phase, playerCount: s.order.length, maxPlayers: LIMITS.maxPlayers };
 	}
 
-	async join(input: { username: unknown; token?: unknown; ipHash: string }): Promise<JoinResult> {
+	/** `asAgent` is set by the MCP endpoint: the player acts over RPC instead of a WebSocket. */
+	async join(input: { username: unknown; token?: unknown; ipHash: string; asAgent?: boolean }): Promise<JoinResult> {
 		const s = this.state;
 		if (!s) return { ok: false, status: 404, error: 'Room not found. It may have expired.' };
 
@@ -240,25 +330,145 @@ export class GameRoomObject extends DurableObject<Env> {
 		if (s.order.length >= LIMITS.maxPlayers) return { ok: false, status: 409, error: 'Room is full.' };
 		if (nameTaken()) return { ok: false, status: 409, error: 'That username is taken in this room.' };
 
+		const agent = input.asAgent === true;
 		const player: PlayerRec = {
 			id: generateId(),
 			token: generateToken(),
 			username,
 			score: 0,
-			connected: false,
-			leaveAt: Date.now() + FIRST_CONNECT_MS,
+			// Agents have no socket: they count as connected until they go quiet for AGENT_IDLE_MS.
+			connected: agent,
+			leaveAt: Date.now() + (agent ? AGENT_IDLE_MS : FIRST_CONNECT_MS),
 			ipHash: input.ipHash,
-			seen: false,
+			seen: agent,
+			kind: agent ? 'agent' : 'human',
 		};
 		s.players[player.id] = player;
 		s.order.push(player.id);
+		player.team = this.teamForLateJoiner(player);
 		if (s.phase !== 'lobby') s.drawQueue.push(player.id);
 		s.ownerId ??= player.id;
+		if (agent) this.system(`${username} joined`);
 		s.emptySince = null;
 		this.reportStats();
 		await this.commit();
 		this.broadcastState();
 		return { ok: true, playerId: player.id, token: player.token, roomId: s.roomId };
+	}
+
+	// -------------------------------------------------------------------------
+	// Agent RPC surface (used by the MCP endpoint). Agents authenticate with their token.
+
+	private agentByToken(token: unknown): PlayerRec | null {
+		const s = this.state;
+		if (!s || typeof token !== 'string') return null;
+		const p = s.order.map((id) => s.players[id]).find((x) => x.token === token && x.kind === 'agent');
+		if (!p) return null;
+		p.leaveAt = Date.now() + AGENT_IDLE_MS;
+		return p;
+	}
+
+	/** Performs one game action for an agent: chat/guess, choose, shapes, start, add-bot, kick, pause, undo, clear, leave. */
+	async agentAct(token: string, action: Record<string, unknown>): Promise<{ ok: boolean; error?: string; notices: string[] }> {
+		const p = this.agentByToken(token);
+		if (!p) return { ok: false, error: 'Session expired or room closed. Join again.', notices: [] };
+		if (!action || typeof action !== 'object' || typeof action.type !== 'string') return { ok: false, error: 'Unknown action.', notices: [] };
+		await this.dispatch(p.id, action);
+		await this.commit();
+		return { ok: true, notices: this.takeNotices(p.id) };
+	}
+
+	/** The agent's view of the game. With `since`, waits up to `waitMs` for something to change first. */
+	async agentView(token: string, opts: { since?: number; waitMs?: number } = {}): Promise<AgentView | { error: string }> {
+		let p = this.agentByToken(token);
+		if (!p) return { error: 'Session expired or room closed. Join again.' };
+		const since = opts.since;
+		const wait = Math.max(0, Math.min(AGENT_WAIT_MAX_MS, Number(opts.waitMs) || 0));
+		if (typeof since === 'number' && wait > 0 && this.state!.version <= since && !this.notices.get(p.id)?.length) {
+			await new Promise<void>((resolve) => {
+				const done = () => {
+					clearTimeout(timer);
+					resolve();
+				};
+				const timer = setTimeout(() => {
+					this.waiters = this.waiters.filter((w) => w !== done);
+					resolve();
+				}, wait);
+				this.waiters.push(done);
+			});
+			p = this.agentByToken(token);
+			if (!p) return { error: 'You are no longer in this room.' };
+		}
+		await this.commit();
+		return this.agentViewOf(p.id);
+	}
+
+	/** PNG of the canvas as the server sees it. */
+	async agentCanvas(token: string, large = false): Promise<{ png: string; width: number; height: number } | { error: string }> {
+		const p = this.agentByToken(token);
+		if (!p) return { error: 'Session expired or room closed. Join again.' };
+		const scale = large ? 1 : 0.5;
+		return { png: await opsToPngBase64(this.loadOps(), scale), width: LIMITS.canvasWidth * scale, height: LIMITS.canvasHeight * scale };
+	}
+
+	private takeNotices(playerId: string): string[] {
+		const n = this.notices.get(playerId) ?? [];
+		this.notices.delete(playerId);
+		return n;
+	}
+
+	private agentViewOf(id: string): AgentView {
+		const s = this.state!;
+		const v = this.viewState(id);
+		const round = s.round;
+		const me = s.players[id];
+		const role = !round ? 'none' : round.drawerId === id ? 'drawer' : 'guesser';
+		const timeLeft = v.remaining === null ? null : Math.round(v.remaining / 1000);
+		let next: string;
+		if (s.phase === 'lobby') {
+			next = s.ownerId === id
+				? s.order.length < 2
+					? 'You are the host. Share the link with people, or add_bot, then start_game.'
+					: 'You are the host. Call start_game when everyone is in.'
+				: 'Waiting for the host to start. Call get_state with wait_seconds.';
+		} else if (s.phase === 'choosing') {
+			next = role === 'drawer' ? `Your turn to draw. Call choose_word with an index into choices: ${round!.choices.map((c, i) => `${i}=${c}`).join(', ')}.` : 'The drawer is picking a word. Call get_state with wait_seconds.';
+		} else if (s.phase === 'drawing') {
+			if (role === 'drawer') next = `Draw "${round!.word}" with the draw tool. Never write the word or letters. Others are guessing.`;
+			else if (round!.guessed.includes(id)) next = 'You guessed it. Wait for the next round with get_state(wait_seconds).';
+			else next = `Call view_canvas to see the drawing, then guess. Pattern: ${v.round?.hint} (${v.round?.hint?.replace(/[^_\p{L}\p{N}]/gu, '').length} letters).`;
+		} else next = 'Round over. The next one starts in a few seconds.';
+
+		return {
+			version: s.version,
+			roomId: s.roomId,
+			link: null,
+			you: { id, name: me.username, isHost: s.ownerId === id, team: me.team ? TEAM_NAMES[me.team] : null, score: me.score },
+			phase: s.phase,
+			paused: v.paused,
+			round: s.roundNumber ? { number: s.roundNumber, of: s.settings.maxRounds } : null,
+			timeLeftSeconds: timeLeft,
+			role,
+			word: v.round?.word ?? null,
+			choices: v.round?.choices ?? null,
+			hint: v.round?.hint ?? null,
+			youGuessed: v.round?.guessed ?? false,
+			canvasStrokes: visibleOps(this.loadOps()).length,
+			players: v.players.map((x) => ({ name: x.username, kind: x.kind, score: x.score, team: x.team ? TEAM_NAMES[x.team as Team] : null, drawing: x.isDrawer, guessed: x.guessed, connected: x.connected })),
+			teams: v.teams,
+			chat: s.chat.filter((m) => this.canSee(m, id)).slice(-15).map((m) => ({ from: m.username ?? 'system', text: m.text, kind: m.kind })),
+			lastRound: v.lastRound
+				? {
+						word: v.lastRound.word,
+						drawer: s.players[v.lastRound.drawerId]?.username ?? null,
+						drawerPoints: v.lastRound.drawerPoints,
+						points: v.lastRound.scoreUpdates.map((u) => ({ name: u.username, points: u.points })),
+					}
+				: null,
+			results: v.results ? { finalScores: v.results.finalScores.map((f) => ({ name: f.username, score: f.score })), teams: v.results.teams ?? null } : null,
+			notices: this.takeNotices(id),
+			next,
+		};
 	}
 
 	// -------------------------------------------------------------------------
@@ -321,27 +531,46 @@ export class GameRoomObject extends DurableObject<Env> {
 			return;
 		}
 
+		await this.dispatch(playerId, msg, ws);
+	}
+
+	/** Game actions, shared by human sockets (`ws` set) and agents over RPC. */
+	private async dispatch(playerId: string, msg: Record<string, unknown>, ws?: WebSocket): Promise<void> {
 		switch (msg.type) {
 			case 'draw':
+				if (!ws) return;
 				// Client flushes at most ~30/s; leave plenty of headroom so legit strokes are never dropped.
 				if (this.allow(`d:${playerId}`, 200, 90)) this.onDraw(ws, playerId, msg.op);
 				else if (this.state?.round?.drawerId === playerId) this.resync(ws, playerId);
 				return;
+			case 'shapes':
+				if (this.allow(`s:${playerId}`, 4, 0.5)) return this.onShapes(playerId, msg.shapes);
+				return this.notify(playerId, 'Slow down a little.');
+			case 'undo':
+			case 'clear':
+				// Humans send these as draw ops; this path is for agents.
+				if (ws) return;
+				if (this.allow(`u:${playerId}`, 10, 2)) return this.onAgentOp(playerId, { k: msg.type });
+				return this.notify(playerId, 'Slow down a little.');
 			case 'chat':
+			case 'guess':
 				if (this.allow(`c:${playerId}`, 6, 1)) await this.onChat(playerId, msg.text);
-				else this.send(ws, { type: 'notice', text: 'Slow down a little.' });
+				else this.notify(playerId, 'Slow down a little.');
 				return;
 			case 'choose':
 				return this.onChoose(playerId, msg.index);
 			case 'start':
-				return this.onStart(ws, playerId, msg.settings, msg.words);
+				return this.onStart(playerId, msg.settings, msg.words);
 			case 'pause':
 				return this.onPause(playerId);
 			case 'kick':
 				return this.onKick(playerId, msg.playerId);
+			case 'add-bot':
+				return this.onAddBot(playerId, msg.model);
 			case 'leave':
 				await this.removePlayer(playerId, 'left');
-				return this.safeClose(ws, CLOSE.left, 'Left room');
+				if (ws) this.safeClose(ws, CLOSE.left, 'Left room');
+				return;
 		}
 	}
 
@@ -380,6 +609,8 @@ export class GameRoomObject extends DurableObject<Env> {
 			else if (s.phase === 'intermission') this.nextRoundOrFinish();
 		}
 
+		this.runBots(now);
+
 		if (s.order.length === 0 && s.emptySince !== null && now - s.emptySince >= EMPTY_ROOM_TTL_MS) {
 			return this.destroy();
 		}
@@ -400,7 +631,20 @@ export class GameRoomObject extends DurableObject<Env> {
 		}
 		const op = cleanDrawOp(raw);
 		if (!op) return;
+		if (op.k === 'clear' || op.k === 'undo') this.replay = null;
+		if (!this.applyOp(op, playerId)) {
+			if (!this.canvasFullNotified) {
+				this.canvasFullNotified = true;
+				this.send(ws, { type: 'resync', ops: this.loadOps() });
+				this.send(ws, { type: 'notice', text: 'The canvas is full. Undo or clear to keep drawing.' });
+			}
+			return;
+		}
+		if (this.resyncPending.has(playerId)) this.resync(ws, playerId);
+	}
 
+	/** Stores an op and broadcasts it. Returns false when the canvas is full. */
+	private applyOp(op: DrawOp, exceptId?: string): boolean {
 		const sql = this.ctx.storage.sql;
 		if (op.k === 'clear') {
 			sql.exec('DELETE FROM ops');
@@ -412,19 +656,73 @@ export class GameRoomObject extends DurableObject<Env> {
 			this.canvasFullNotified = false;
 		} else {
 			this.opCount ??= sql.exec<{ n: number }>('SELECT COUNT(*) AS n FROM ops').one().n;
-			if (this.opCount >= LIMITS.maxOpsPerRound) {
-				if (!this.canvasFullNotified) {
-					this.canvasFullNotified = true;
-					this.send(ws, { type: 'resync', ops: this.loadOps() });
-					this.send(ws, { type: 'notice', text: 'The canvas is full. Undo or clear to keep drawing.' });
-				}
-				return;
-			}
+			if (this.opCount >= LIMITS.maxOpsPerRound) return false;
 			sql.exec('INSERT INTO ops (stroke, data) VALUES (?, ?)', op.s, JSON.stringify(op));
 			this.opCount++;
 		}
-		this.broadcastRaw(JSON.stringify({ type: 'draw', op }), playerId);
-		if (this.resyncPending.has(playerId)) this.resync(ws, playerId);
+		this.broadcastRaw(JSON.stringify({ type: 'draw', op }), exceptId);
+		return true;
+	}
+
+	private nextStrokeId(): number {
+		const stored = this.ctx.storage.sql.exec<{ m: number | null }>('SELECT MAX(stroke) AS m FROM ops').one().m ?? 0;
+		const pending = this.replay?.ops.reduce((m, o) => Math.max(m, 's' in o ? o.s : 0), 0) ?? 0;
+		return Math.max(stored, pending) + 1;
+	}
+
+	/** The drawer (bot, agent, or a human's browser agent via WebMCP) sends shapes; they're replayed gradually. */
+	private async onShapes(playerId: string, raw: unknown) {
+		const s = this.state!;
+		if (s.round?.drawerId !== playerId || s.phase !== 'drawing') return this.notify(playerId, "It's not your turn to draw.");
+		const shapes = cleanShapes(raw);
+		if (!shapes.length) return this.notify(playerId, 'No valid shapes to draw. Check the shape format.');
+		this.enqueueOps(playerId, shapesToOps(shapes, this.nextStrokeId()));
+	}
+
+	/** Undo/clear for agents, applied immediately. */
+	private onAgentOp(playerId: string, op: DrawOp) {
+		const s = this.state!;
+		if (s.round?.drawerId !== playerId || s.phase !== 'drawing') return this.notify(playerId, "It's not your turn to draw.");
+		this.replay = null;
+		this.applyOp(op);
+	}
+
+	private enqueueOps(playerId: string, ops: DrawOp[]) {
+		const round = this.state!.round!;
+		if (this.replay && (this.replay.round !== round.number || this.replay.playerId !== playerId)) this.replay = null;
+		this.replay ??= { playerId, round: round.number, ops: [], perTick: 1 };
+		this.replay.ops.push(...ops);
+		// Big drawings replay faster, so every drawing takes roughly REPLAY_TARGET_MS.
+		this.replay.perTick = Math.max(1, Math.ceil(this.replay.ops.length / (REPLAY_TARGET_MS / REPLAY_TICK_MS)));
+		this.scheduleReplay(0);
+	}
+
+	private scheduleReplay(ms: number) {
+		if (this.replayTimer) return;
+		this.replayTimer = setTimeout(() => {
+			this.replayTimer = null;
+			this.replayStep();
+		}, ms);
+	}
+
+	private replayStep() {
+		const s = this.state;
+		const r = this.replay;
+		if (!s || !r) return;
+		const round = s.round;
+		if (!round || round.number !== r.round || round.drawerId !== r.playerId || s.phase !== 'drawing') {
+			this.replay = null;
+			return;
+		}
+		if (s.pausedAt !== null) return this.scheduleReplay(500);
+		for (let i = 0; i < r.perTick && r.ops.length; i++) {
+			if (!this.applyOp(r.ops.shift()!)) {
+				r.ops = [];
+				this.notify(r.playerId, 'The canvas is full.');
+			}
+		}
+		if (r.ops.length) this.scheduleReplay(REPLAY_TICK_MS);
+		else this.replay = null;
 	}
 
 	private async onChat(playerId: string, rawText: unknown) {
@@ -433,7 +731,7 @@ export class GameRoomObject extends DurableObject<Env> {
 		const text = cleanChat(rawText);
 		if (!text) return;
 		const round = s.round;
-		if (s.pausedAt !== null) return this.sendTo(playerId, { type: 'notice', text: 'The game is paused.' });
+		if (s.pausedAt !== null) return this.notify(playerId, 'The game is paused.');
 
 		// Outside of drawing, chat is just chat.
 		if (s.phase !== 'drawing' || !round?.word) {
@@ -446,7 +744,7 @@ export class GameRoomObject extends DurableObject<Env> {
 		if (round.drawerId === playerId || round.guessed.includes(playerId)) {
 			// Deliberately stricter than containsWord(): "cats" or "bobcat" would still give the word away.
 			if (round.drawerId === playerId && normalizeGuess(text).includes(normalizeGuess(round.word))) {
-				this.sendTo(playerId, { type: 'notice', text: "You can't say the word." });
+				this.notify(playerId, "You can't say the word.");
 				return;
 			}
 			this.pushChat({ id: generateId(), ts: Date.now(), kind: 'chat', playerId, username: player.username, text, round: round.number });
@@ -473,8 +771,8 @@ export class GameRoomObject extends DurableObject<Env> {
 		}
 
 		// Near misses and guesses that contain the word ("is it a cat?") would give it away: keep them private.
-		if (containsWord(text, round.word)) return this.sendTo(playerId, { type: 'notice', text: `"${text}" is very close. Just the word, please.` });
-		if (isCloseGuess(text, round.word)) return this.sendTo(playerId, { type: 'notice', text: `"${text}" is close!` });
+		if (containsWord(text, round.word)) return this.notify(playerId, `"${text}" is very close. Just the word, please.`);
+		if (isCloseGuess(text, round.word)) return this.notify(playerId, `"${text}" is close!`);
 		this.pushChat({ id: generateId(), ts: Date.now(), kind: 'chat', playerId, username: player.username, text });
 		await this.commit();
 	}
@@ -488,23 +786,24 @@ export class GameRoomObject extends DurableObject<Env> {
 		await this.commit();
 	}
 
-	private async onStart(ws: WebSocket, playerId: string, rawSettings: unknown, rawWords: unknown) {
+	private async onStart(playerId: string, rawSettings: unknown, rawWords: unknown) {
 		const s = this.state!;
-		if (s.ownerId !== playerId) return this.send(ws, { type: 'notice', text: 'Only the room owner can start the game.' });
-		if (s.phase !== 'lobby') return;
+		if (s.ownerId !== playerId) return this.notify(playerId, 'Only the room owner can start the game.');
+		if (s.phase !== 'lobby') return this.notify(playerId, 'The game has already started.');
 		const ready = s.order.filter((id) => s.players[id].connected);
-		if (ready.length < 2) return this.send(ws, { type: 'notice', text: 'You need at least 2 players to start.' });
+		if (ready.length < 2) return this.notify(playerId, 'You need at least 2 players to start. Invite someone or add a bot.');
 
 		s.settings = cleanSettings(rawSettings);
 		s.customWords = rawWords == null ? null : cleanCustomWords(rawWords);
 		if (rawWords != null && !s.customWords) {
-			return this.send(ws, { type: 'notice', text: `Custom word lists need at least ${LIMITS.customWordsMin} unique words.` });
+			return this.notify(playerId, `Custom word lists need at least ${LIMITS.customWordsMin} unique words.`);
 		}
 
 		for (const id of s.order) s.players[id].score = 0;
 		s.roundNumber = 0;
 		s.usedWords = [];
-		s.drawQueue = [...s.order];
+		this.assignTeams();
+		s.drawQueue = this.turnOrder();
 		s.results = null;
 		s.lastRound = null;
 		this.system('Game started. Good luck!');
@@ -538,9 +837,237 @@ export class GameRoomObject extends DurableObject<Env> {
 		if (!target) return;
 		const now = Date.now();
 		for (const [ip, until] of Object.entries(s.bans)) if (until <= now) delete s.bans[ip];
-		s.bans[target.ipHash] = now + BAN_MS;
+		// Bots are just removed; they have no network to ban.
+		if (target.kind !== 'bot') s.bans[target.ipHash] = now + BAN_MS;
 		for (const ws of this.ctx.getWebSockets(targetId)) this.safeClose(ws, CLOSE.kicked, 'Removed by room owner');
 		await this.removePlayer(targetId, 'kicked');
+	}
+
+	private async onAddBot(requesterId: string, rawModel: unknown) {
+		const s = this.state!;
+		if (s.ownerId !== requesterId) return this.notify(requesterId, 'Only the host can add bots.');
+		if (s.order.length >= LIMITS.maxPlayers) return this.notify(requesterId, 'The room is full.');
+		if (s.order.filter((id) => s.players[id].kind === 'bot').length >= MAX_BOTS) return this.notify(requesterId, `Up to ${MAX_BOTS} bots per room.`);
+		const model = findModel(rawModel) ?? findModel(DEFAULT_BOT_MODEL)!;
+		const taken = new Set(s.order.map((id) => normalizeGuess(s.players[id].username)));
+		let username = `${model.short} bot`;
+		for (let n = 2; taken.has(normalizeGuess(username)); n++) username = `${model.short} bot ${n}`;
+		const bot: PlayerRec = {
+			id: generateId(),
+			token: generateToken(),
+			username,
+			score: 0,
+			connected: true,
+			leaveAt: null,
+			ipHash: 'bot',
+			seen: true,
+			kind: 'bot',
+			model: model.id,
+		};
+		s.players[bot.id] = bot;
+		s.order.push(bot.id);
+		bot.team = this.teamForLateJoiner(bot);
+		s.bots[bot.id] = { round: 0, nextAt: null, guesses: 0, planned: false, tried: [], outOfBudget: false };
+		if (s.phase !== 'lobby') {
+			s.drawQueue.push(bot.id);
+			if (s.phase === 'drawing') s.bots[bot.id].nextAt = Date.now() + between(BOT_FIRST_LOOK_MS);
+		}
+		this.system(`${username} joined (${model.label})`);
+		this.broadcastState();
+		this.reportStats();
+		await this.commit();
+	}
+
+	// -------------------------------------------------------------------------
+	// Bots
+
+	/** Called from the alarm: lets every bot whose timer is due take its next step. */
+	private runBots(now: number) {
+		const s = this.state!;
+		const round = s.round;
+		if (s.pausedAt !== null || !round || (s.phase !== 'choosing' && s.phase !== 'drawing')) return;
+		for (const id of s.order) {
+			const p = s.players[id];
+			const b = s.bots[id];
+			if (p.kind !== 'bot' || !b || b.outOfBudget) continue;
+			if (b.nextAt === null || b.nextAt > now || this.botBusy.has(id)) continue;
+			b.nextAt = null;
+			if (round.drawerId === id) {
+				if (s.phase === 'choosing' && !round.word) this.chooseWord(round, pickRandom(round.choices));
+				else if (s.phase === 'drawing' && !b.planned) {
+					b.planned = true;
+					this.think(id, () => this.botDraw(id, round.number));
+				}
+				continue;
+			}
+			if (s.phase !== 'drawing' || round.guessed.includes(id) || b.guesses >= BOT_MAX_GUESSES) continue;
+			b.nextAt = now + between(BOT_GUESS_EVERY_MS);
+			// Nothing worth looking at yet.
+			if (visibleOps(this.loadOps()).length < 3) continue;
+			b.guesses++;
+			this.think(id, () => this.botGuess(id, round.number));
+		}
+	}
+
+	/** Resets bot timers at the start of each phase. */
+	private scheduleBots() {
+		const s = this.state!;
+		const round = s.round;
+		if (!round) return;
+		const now = Date.now();
+		for (const id of s.order) {
+			if (s.players[id].kind !== 'bot') continue;
+			const b = (s.bots[id] ??= { round: 0, nextAt: null, guesses: 0, planned: false, tried: [], outOfBudget: false });
+			if (b.round !== round.number) Object.assign(b, { round: round.number, guesses: 0, planned: false, tried: [] });
+			if (round.drawerId === id) b.nextAt = now + (s.phase === 'choosing' ? BOT_CHOOSE_MS : 600);
+			else b.nextAt = s.phase === 'drawing' ? now + between(BOT_FIRST_LOOK_MS) : null;
+		}
+	}
+
+	/** Runs a model call off the alarm, marking the bot as thinking. Errors never break the room. */
+	private think(botId: string, fn: () => Promise<void>) {
+		this.botBusy.add(botId);
+		this.broadcastState();
+		this.ctx.waitUntil(
+			fn()
+				.catch((err) => console.warn(JSON.stringify({ msg: 'bot error', botId, error: String(err) })))
+				.finally(async () => {
+					this.botBusy.delete(botId);
+					if (this.state?.players[botId]) this.broadcastState();
+					await this.commit();
+				}),
+		);
+	}
+
+	private botModel(botId: string): BotModel {
+		return findModel(this.state!.players[botId]?.model) ?? BOT_MODELS[0];
+	}
+
+	/** Checks the shared daily AI budget. A bot that runs out says so once and sits quietly. */
+	private async spendAi(botId: string, model: BotModel): Promise<boolean> {
+		let ok = true;
+		try {
+			ok = await this.env.GLOBAL_STATS.getByName('global').spendAi(model.paid);
+		} catch (err) {
+			console.warn('ai budget check failed', err);
+		}
+		const b = this.state?.bots[botId];
+		if (!ok && b && !b.outOfBudget) {
+			b.outOfBudget = true;
+			this.system(`${this.state!.players[botId].username} is out of energy for today (AI budget reached).`);
+		}
+		return ok;
+	}
+
+	private stillGuessing(botId: string, roundNumber: number): boolean {
+		const s = this.state;
+		const round = s?.round;
+		return !!s && !!round && round.number === roundNumber && s.phase === 'drawing' && !!s.players[botId] && round.drawerId !== botId && !round.guessed.includes(botId);
+	}
+
+	private async botGuess(botId: string, roundNumber: number) {
+		const model = this.botModel(botId);
+		if (!this.stillGuessing(botId, roundNumber) || !(await this.spendAi(botId, model))) return;
+		const round = this.state!.round!;
+		const word = round.word!;
+		const png = await opsToPngBase64(this.loadOps(), 0.5);
+		const b = this.state!.bots[botId];
+		const others = this.state!.chat.filter((m) => m.kind === 'chat' && m.round === undefined && m.ts >= (round.drawStartedAt ?? 0)).map((m) => m.text);
+		const tried = [...new Set([...b.tried, ...others])];
+		const hint = [...maskWord(word, round.revealed)].join(' ');
+		const letters = [...word].filter((c) => /[\p{L}\p{N}]/u.test(c)).length;
+		const guesses = await this.brain.guess(model, { png, hint, letters, tried });
+		if (!this.stillGuessing(botId, roundNumber)) return;
+		const pick = guesses.find((g) => !tried.some((t) => normalizeGuess(t) === normalizeGuess(g)));
+		if (!pick) return;
+		b.tried.push(pick);
+		await this.onChat(botId, pick);
+	}
+
+	private async botDraw(botId: string, roundNumber: number) {
+		const s = this.state!;
+		const model = this.botModel(botId);
+		const stillDrawing = () => {
+			const r = this.state?.round;
+			return !!r && r.number === roundNumber && r.drawerId === botId && this.state!.phase === 'drawing';
+		};
+		if (!stillDrawing() || !(await this.spendAi(botId, model))) {
+			if (stillDrawing()) this.endRound(`${s.players[botId].username} couldn't draw this turn.`);
+			return;
+		}
+		let drawn = 0;
+		try {
+			// Shapes stream in as the model writes them, so the drawing starts within a second or two.
+			await this.brain.plan(model, s.round!.word!, (shapes) => {
+				if (!stillDrawing()) return;
+				drawn += shapes.length;
+				this.enqueueOps(botId, shapesToOps(shapes, this.nextStrokeId()));
+			});
+		} catch (err) {
+			console.warn(JSON.stringify({ msg: 'bot plan failed', model: model.id, error: String(err) }));
+		}
+		if (stillDrawing() && drawn === 0) this.endRound(`${s.players[botId].username} couldn't think how to draw it.`);
+	}
+
+	// -------------------------------------------------------------------------
+	// Teams
+
+	private isAi(p: PlayerRec) {
+		return p.kind === 'bot' || p.kind === 'agent';
+	}
+
+	private assignTeams() {
+		const s = this.state!;
+		for (const id of s.order) s.players[id].team = null;
+		if (s.settings.mode !== 'teams') return;
+		const ids = [...s.order].sort(() => Math.random() - 0.5);
+		if (s.settings.teamSplit === 'humans-vs-ai') {
+			const humans = ids.filter((id) => !this.isAi(s.players[id]));
+			const ai = ids.filter((id) => this.isAi(s.players[id]));
+			if (humans.length && ai.length) {
+				for (const id of humans) s.players[id].team = 'A';
+				for (const id of ai) s.players[id].team = 'B';
+				this.system(`${TEAM_NAMES.A} (humans) vs ${TEAM_NAMES.B} (AI). Points add up per team.`);
+				return;
+			}
+			this.system('Humans vs AI needs at least one of each, so the teams are mixed.');
+		}
+		ids.forEach((id, i) => (s.players[id].team = i % 2 ? 'B' : 'A'));
+		this.system(`Teams are set: ${TEAM_NAMES.A} vs ${TEAM_NAMES.B}. Points add up per team.`);
+	}
+
+	/** Mid-game joiners go to the AI side (humans vs AI) or the smaller team. */
+	private teamForLateJoiner(p: PlayerRec): Team | null {
+		const s = this.state!;
+		if (s.settings.mode !== 'teams' || s.phase === 'lobby') return null;
+		const members = (t: Team) => s.order.filter((id) => id !== p.id && s.players[id].team === t);
+		if (s.settings.teamSplit === 'humans-vs-ai') {
+			const aSideIsHumans = members('A').every((id) => !this.isAi(s.players[id]));
+			if (aSideIsHumans) return this.isAi(p) ? 'B' : 'A';
+		}
+		return members('A').length <= members('B').length ? 'A' : 'B';
+	}
+
+	/** Drawing order: join order, or alternating teams so neither side draws twice in a row. */
+	private turnOrder(): string[] {
+		const s = this.state!;
+		if (s.settings.mode !== 'teams') return [...s.order];
+		const a = s.order.filter((id) => s.players[id].team === 'A');
+		const b = s.order.filter((id) => s.players[id].team === 'B');
+		const out: string[] = [];
+		for (let i = 0; i < Math.max(a.length, b.length); i++) {
+			if (a[i]) out.push(a[i]);
+			if (b[i]) out.push(b[i]);
+		}
+		return out;
+	}
+
+	private teamScores(): { team: Team; name: string; score: number }[] | null {
+		const s = this.state!;
+		if (s.settings.mode !== 'teams' || !s.order.some((id) => s.players[id].team)) return null;
+		return (['A', 'B'] as const)
+			.map((team) => ({ team, name: TEAM_NAMES[team], score: s.order.filter((id) => s.players[id].team === team).reduce((n, id) => n + s.players[id].score, 0) }))
+			.sort((x, y) => y.score - x.score);
 	}
 
 	private async onSocketGone(ws: WebSocket) {
@@ -563,7 +1090,7 @@ export class GameRoomObject extends DurableObject<Env> {
 		const s = this.state!;
 		const connected = (id: string) => s.players[id]?.connected;
 		s.drawQueue = s.drawQueue.filter((id) => s.players[id]);
-		if (!s.drawQueue.some(connected)) s.drawQueue = [...s.order];
+		if (!s.drawQueue.some(connected)) s.drawQueue = this.turnOrder();
 		const drawerId = s.drawQueue.find(connected);
 		if (!drawerId || s.order.length < 2) return this.finishGame('Not enough players');
 		s.drawQueue = s.drawQueue.filter((id) => id !== drawerId);
@@ -591,6 +1118,8 @@ export class GameRoomObject extends DurableObject<Env> {
 		this.opCount = 0;
 		this.canvasFullNotified = false;
 		this.resyncPending.clear();
+		this.replay = null;
+		this.scheduleBots();
 		this.broadcastState();
 		this.reportStats(true);
 	}
@@ -604,6 +1133,8 @@ export class GameRoomObject extends DurableObject<Env> {
 		round.hintAt = [0.5, 0.75].slice(0, hints).map((f) => now + round.durationMs * f);
 		s.phase = 'drawing';
 		s.deadline = now + round.durationMs;
+		round.drawStartedAt = now;
+		this.scheduleBots();
 		this.broadcastState();
 	}
 
@@ -663,8 +1194,14 @@ export class GameRoomObject extends DurableObject<Env> {
 		s.deadline = null;
 		s.pausedAt = null;
 		s.drawQueue = [];
-		s.results = hadGame ? { id: generateId(), finalScores, reason } : null;
-		if (hadGame && finalScores[0]) this.system(reason ? `Game over: ${reason}.` : `${finalScores[0].username} wins with ${finalScores[0].score} points!`);
+		const teams = this.teamScores() ?? undefined;
+		s.results = hadGame ? { id: generateId(), finalScores, reason, teams } : null;
+		if (hadGame && finalScores[0]) {
+			if (reason) this.system(`Game over: ${reason}.`);
+			else if (teams) this.system(teams[0].score === teams[1].score ? `It's a draw at ${teams[0].score} points each!` : `${teams[0].name} wins with ${teams[0].score} points!`);
+			else if (finalScores[0].score === 0) this.system('Game over. Nobody scored this time.');
+			else this.system(`${finalScores[0].username} wins with ${finalScores[0].score} points!`);
+		}
 		this.broadcastState();
 		this.reportStats(true);
 	}
@@ -679,13 +1216,26 @@ export class GameRoomObject extends DurableObject<Env> {
 		this.buckets.delete(`c:${playerId}`);
 		this.buckets.delete(`d:${playerId}`);
 		this.buckets.delete(`r:${playerId}`);
+		this.buckets.delete(`s:${playerId}`);
 		this.resyncPending.delete(playerId);
+		this.notices.delete(playerId);
+		delete s.bots[playerId];
+		if (this.replay?.playerId === playerId) this.replay = null;
 
 		const verb = why === 'kicked' ? 'was removed' : why === 'timeout' ? 'disconnected' : 'left';
 		if (player.seen) this.system(`${player.username} ${verb}`);
 
+		// Bots only play alongside someone: when the last human or agent goes, so do the bots.
+		if (player.kind !== 'bot' && s.order.length && s.order.every((id) => s.players[id].kind === 'bot')) {
+			for (const id of s.order) delete s.players[id];
+			s.order = [];
+			s.drawQueue = [];
+			s.bots = {};
+		}
+
 		if (s.ownerId === playerId) {
-			s.ownerId = s.order.find((id) => s.players[id].connected) ?? s.order[0] ?? null;
+			const candidates = s.order.filter((id) => s.players[id].kind !== 'bot');
+			s.ownerId = candidates.find((id) => s.players[id].connected) ?? candidates[0] ?? null;
 			if (s.ownerId) this.system(`${s.players[s.ownerId].username} is now the host`);
 		}
 
@@ -746,8 +1296,13 @@ export class GameRoomObject extends DurableObject<Env> {
 					connected: p.connected,
 					guessed: !!round?.guessed.includes(id),
 					isDrawer: round?.drawerId === id,
+					kind: p.kind ?? 'human',
+					model: p.kind === 'bot' ? (findModel(p.model)?.label ?? null) : null,
+					team: p.team ?? null,
+					thinking: this.botBusy.has(id),
 				};
 			}),
+			teams: this.teamScores(),
 			round: round
 				? {
 						drawerId: round.drawerId,
@@ -778,12 +1333,36 @@ export class GameRoomObject extends DurableObject<Env> {
 	// -------------------------------------------------------------------------
 	// Messaging
 
+	/** A private message to one player: a toast for humans, queued for agents' next call. */
+	private notify(playerId: string, text: string) {
+		const p = this.state?.players[playerId];
+		if (p?.kind === 'agent') {
+			const q = this.notices.get(playerId) ?? [];
+			q.push(text);
+			this.notices.set(playerId, q.slice(-10));
+			this.wake();
+		} else if (p?.kind !== 'bot') this.sendTo(playerId, { type: 'notice', text });
+	}
+
+	/** Something changed: bump the version and release long-polling agents. */
+	private bump() {
+		if (this.state) this.state.version++;
+		this.wake();
+	}
+
+	private wake() {
+		const w = this.waiters;
+		this.waiters = [];
+		for (const done of w) done();
+	}
+
 	private system(text: string) {
 		this.pushChat({ id: generateId(), ts: Date.now(), kind: 'system', text });
 	}
 
 	private pushChat(msg: ChatMsg) {
 		const s = this.state!;
+		this.bump();
 		s.chat.push(msg);
 		if (s.chat.length > LIMITS.chatHistory) s.chat.splice(0, s.chat.length - LIMITS.chatHistory);
 		const payload = JSON.stringify({ type: 'chat', msg });
@@ -794,6 +1373,7 @@ export class GameRoomObject extends DurableObject<Env> {
 	}
 
 	private broadcastState(exceptId?: string) {
+		this.bump();
 		for (const ws of this.ctx.getWebSockets()) {
 			const id = (ws.deserializeAttachment() as Attachment | null)?.playerId;
 			if (id && id !== exceptId && this.state?.players[id]) this.send(ws, { type: 'state', state: this.viewState(id) });
@@ -878,6 +1458,8 @@ export class GameRoomObject extends DurableObject<Env> {
 		for (const id of s.order) {
 			const t = s.players[id].leaveAt;
 			if (t !== null) candidates.push(t);
+			const botAt = s.bots[id]?.nextAt;
+			if (s.pausedAt === null && typeof botAt === 'number') candidates.push(botAt);
 		}
 		if (s.emptySince !== null) candidates.push(s.emptySince + EMPTY_ROOM_TTL_MS);
 		if (s.order.length > 0) candidates.push(s.statsReportedAt + STATS_HEARTBEAT_MS);
