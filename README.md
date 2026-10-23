@@ -5,7 +5,7 @@ It runs entirely on Cloudflare Workers and Durable Objects.
 
 **Play it:** https://wutizzit.jonnyparris.workers.dev
 
-![Drawing a house while the others guess](docs/screenshots/drawing.png)
+![A full round: Alice draws a house on desktop while Cara guesses on her phone](docs/demo.gif)
 
 <table>
   <tr>
@@ -103,6 +103,7 @@ npm test           # Vitest inside the Workers runtime (@cloudflare/vitest-plugi
 npm run typecheck
 BASE_URL=http://localhost:8787 npm run test:e2e            # browser end-to-end tests
 BASE_URL=http://localhost:8787 node scripts/screenshots.mjs # regenerate docs/screenshots
+BASE_URL=http://localhost:8787 node scripts/demo.mjs        # regenerate docs/demo.gif (needs ffmpeg + gifski)
 npm run deploy     # builds CSS, then wrangler deploy
 ```
 
@@ -123,7 +124,7 @@ Run `npm run cf-typegen` after you change `wrangler.jsonc`.
 ├── public/                    # index.html, game.js, favicon, _headers (CSP and security headers)
 ├── test/                      # Vitest (unit + Durable Object integration)
 ├── e2e/                       # Playwright end-to-end scripts
-├── scripts/screenshots.mjs    # README screenshots
+├── scripts/                   # screenshots.mjs and demo.mjs regenerate the README images
 └── wrangler.jsonc
 ```
 
