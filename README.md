@@ -1,75 +1,75 @@
-# 🎨 Wutizzit - Multiplayer Drawing Game
+# Wutizzit
 
-A real-time multiplayer drawing and guessing game built with Cloudflare Workers, Durable Objects, and WebSockets.
+A multiplayer drawing and guessing game. One person draws, everyone else races to guess the word.
+It runs entirely on Cloudflare Workers and Durable Objects.
 
-## 🎮 How to Play
+**Play it:** https://wutizzit.jonnyparris.workers.dev
 
-1. **Create or Join a Room**: Enter your username and either create a new room or join an existing one
-2. **Wait for Players**: Games need at least 2 players to start
-3. **Draw and Guess**: Take turns drawing words while others try to guess what you're drawing
-4. **Score Points**: Earn points for correct guesses and successful drawings
-5. **Celebrate Winners**: See the podium with top 3 players at the end!
+![Drawing a house while the others guess](docs/screenshots/drawing.png)
 
-## ✨ Features
+<table>
+  <tr>
+    <td width="62%"><img src="docs/screenshots/home.png" alt="Home page with name field, create room button and join by code" /></td>
+    <td rowspan="2"><img src="docs/screenshots/guessing-mobile.jpg" alt="Guessing on a phone: timer ring, letter slots and chat" /></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/results.png" alt="Results dialog with a podium for the top three players" /></td>
+  </tr>
+</table>
 
-### Core Gameplay
-- **Real-time Drawing**: Smooth canvas drawing with multiple colors and brush sizes
-- **Live Chat**: Chat with other players and make guesses
-- **Timer System**: Configurable round durations (30s, 60s, 90s, 3min)
-- **Scoring System**: Points for correct guesses and drawing quality
-- **Multiple Rounds**: Customizable number of rounds (5-20)
+## How to play
 
-### Game Customization
-- **Round Duration Settings**: Game owners can set round duration from 30 seconds to 3 minutes
-- **Word Choice Options**: Configure number of word choices for drawers (2-5 options)
-- **Custom Word Lists**: Upload your own word lists for themed games
-- **Room Management**: Ban disruptive players, transfer ownership automatically
+1. Pick a name and create a room. Send the link (or the 6-character code) to your friends.
+2. The host picks the settings and starts the game once at least 2 players are in.
+3. Each turn, the drawer chooses one of a few words and has a set time to draw it.
+4. Everyone else types guesses into the chat. The faster you guess, the more you score.
+5. After the last round, the results screen shows the podium.
 
-### Enhanced Experience
-- **Results screen**: Podium for the top 3 plus the rest of the table
-- **Clean, responsive UI**: Inline SVG icons, initials avatars, a timer ring and letter-slot hints
-- **Sound Effects**: Audio feedback for correct guesses, timer warnings, and game events
-- **No Word Repetition**: Words won't repeat during the same game
-- **Responsive Design**: Works on desktop and mobile devices
+<table>
+  <tr>
+    <td><img src="docs/screenshots/lobby.png" alt="Lobby with host settings: rounds, draw time, word choices and custom words" /></td>
+    <td><img src="docs/screenshots/round-scores.png" alt="End of a round: the word and the points each player earned" /></td>
+  </tr>
+</table>
 
-### Technical Features
-- **Hibernating WebSockets**: Durable Objects sleep between messages, so idle rooms cost nothing
-- **Reconnect-safe**: refresh or drop off Wi-Fi and you keep your seat and score for 30 seconds
-- **Late-join replay**: the drawing is stored in the room's SQLite, so new players see the full picture
-- **Server-authoritative timers**: Durable Object alarms drive rounds; clients just count down locally
-- **Built for the edge**: static assets are served from Cloudflare's cache without invoking the Worker
+## Features
 
-## 🚀 Technology Stack
+**Game**
+- 2 to 10 players per room.
+- Host settings:
+  - Rounds come in multiples of the player count, so everyone draws equally often (unless someone joins mid-game).
+  - Draw time of 30 seconds to 3 minutes.
+  - 2 to 5 word choices per turn.
+- Custom word lists (5 to 500 words), or the built-in list of about 350 words.
+- Letter-slot hints that reveal letters as time runs out.
+- Words don't repeat until the list runs out. Small custom lists start repeating sooner.
+- Scoring: guessers get 25 to 250 points, more for guessing fast and guessing first. The drawer gets 50 per correct guess.
+- Near misses ("hous") and guesses that contain the word are shown only to you, so nobody can copy them.
 
-- **Frontend**: Vanilla JavaScript, HTML5 Canvas (Pointer Events), Tailwind CSS v4 (compiled at build time)
-- **Backend**: Cloudflare Workers, SQLite-backed Durable Objects, Durable Object RPC + alarms
-- **Real-time**: WebSocket Hibernation API with auto-responding keepalive pings
-- **Abuse protection**: Workers Rate Limiting binding on room creation and joins, per-socket token buckets
-- **Hosting**: Workers Static Assets with SPA fallback for `/room/:code` links
+**Drawing**
+- 12 colours, brush sizes from 2 to 40, flood fill, undo (Ctrl/Cmd+Z) and clear.
+- Shortcuts: B for brush, F for fill.
+- Pointer Events, so mouse, pen and touch all work.
+- Every device renders the same pixels, including fills.
 
-## 🎯 Game Rules
+**Rooms**
+- Refresh or lose Wi-Fi and you keep your seat and score for 30 seconds.
+- Players who join mid-round see the full drawing.
+- The host can pause, and can remove a player. The ban applies to the player's network (IP address) for 10 minutes, so others on the same Wi-Fi are blocked too.
+- If the host leaves, another player becomes the host.
 
-- **Minimum Players**: 2 players required to start
-- **Maximum Players**: Up to 10 players per room
-- **Drawing Time**: Configurable (30 seconds to 3 minutes per round)
-- **Word Selection**: Drawer chooses from 2-5 random words
-- **Scoring**: 
-  - Guessers: Points based on how quickly they guess correctly
-  - Drawer: Points when others guess their drawing correctly
-- **Winner**: Player with the most points after all rounds
+**Interface**
+- Clean, responsive layout that works on phones (chat sits under the canvas, the timer stays pinned).
+- Inline SVG icons, initials avatars and a countdown ring.
+- Optional sound effects.
 
-## 🛠️ Development
+## Technology
 
-```bash
-npm install
-npm run dev        # wrangler dev (builds Tailwind first). Run `npm run dev:css` alongside to watch CSS.
-npm test           # Vitest inside the Workers runtime (@cloudflare/vitest-plugin)
-BASE_URL=http://localhost:8787 npm run test:e2e   # Browser e2e (needs `npm run dev` and `npx playwright install chromium`, or set CHROMIUM_PATH)
-npm run typecheck
-npm run deploy     # builds CSS, then wrangler deploy
-```
-
-Run `npm run cf-typegen` after changing `wrangler.jsonc`.
+- **Frontend:** vanilla JavaScript, HTML5 Canvas, Tailwind CSS v4 compiled at build time.
+- **Backend:** a Cloudflare Worker plus SQLite-backed Durable Objects, using RPC and alarms.
+- **Real time:** the WebSocket Hibernation API, so idle rooms cost nothing.
+- **Abuse protection:** the Workers Rate Limiting binding on room creation and joins, and per-player in-memory token buckets for draw, chat and resync messages.
+- **Hosting:** Workers Static Assets, with SPA fallback for `/room/:code` links.
 
 ### Architecture
 
@@ -79,22 +79,40 @@ Browser ──HTTP──▶ Worker (src/index.ts)
   │                 ├─ POST /rooms/:code/join → GameRoom.join()        (rate limited, returns secret token)
   │                 ├─ GET  /rooms/:code      → GameRoom.summary()
   │                 └─ GET  /api/lobby        → GlobalStats.snapshot() (edge-cached 3s)
-  └──WebSocket──▶ /rooms/:code/ws?token=…  → GameRoom (hibernating)
+  └──WebSocket──▶ /rooms/:code/ws  → GameRoom (hibernating; token sent in Sec-WebSocket-Protocol)
                      state:  ctx.storage.kv   (sync KV API)
                      canvas: ctx.storage.sql  (ops table, replayed on join)
                      timers: one alarm for round deadlines, hints, reconnect grace, idle cleanup
 ```
 
-- Each player has a public `id` (shared with everyone) and a secret `token` (only theirs). All game
-  actions (`start`, `choose`, `draw`, `chat`, `pause`, `kick`, `leave`) go over the socket, so they
-  are tied to an authenticated connection.
-- The server sends each player a personalised `state` snapshot: the drawer sees the word and word
-  choices, guessers see only the masked hint. Correct guesses are never echoed to other players.
-- Drawing is sent as batched ops (`line` with many points, `fill`, `undo`, `clear`), one message
-  per animation frame. Every client keeps the same op log, so undo and late joins render identically.
+- Each player has a public `id`, which everyone sees, and a secret `token`, which only they hold.
+  All game actions go over the authenticated socket. Actions include `start`, `choose`, `draw`,
+  `chat`, `pause`, `kick` and `leave`.
+- The server sends each player their own `state` snapshot. The drawer sees the word. Guessers see
+  only the masked hint. Correct guesses are never echoed to other players.
+- Drawing is sent as batched ops (`line`, `fill`, `undo`, `clear`), at most one message per
+  animation frame. Every client keeps the same op log, so undo and late joins render identically.
 - Empty rooms delete their storage after 10 minutes.
 
-### Project Structure
+## Development
+
+```bash
+npm install
+npm run dev        # wrangler dev (builds Tailwind first). Run `npm run dev:css` alongside to watch CSS.
+npm test           # Vitest inside the Workers runtime (@cloudflare/vitest-plugin)
+npm run typecheck
+BASE_URL=http://localhost:8787 npm run test:e2e            # browser end-to-end tests
+BASE_URL=http://localhost:8787 node scripts/screenshots.mjs # regenerate docs/screenshots
+npm run deploy     # builds CSS, then wrangler deploy
+```
+
+The browser scripts need a running `npm run dev`. They also need `npx playwright install chromium`,
+or a `CHROMIUM_PATH` that points at a Chromium binary.
+
+Run `npm run cf-typegen` after you change `wrangler.jsonc`.
+
+### Project structure
+
 ```
 ├── src/
 │   ├── index.ts               # Worker router
@@ -102,44 +120,18 @@ Browser ──HTTP──▶ Worker (src/index.ts)
 │   ├── game/logic.ts          # Pure helpers: matching, hints, scoring, validation
 │   ├── client/styles.css      # Tailwind source → public/styles.css
 │   └── utils/                 # IDs, word list
-├── public/                    # index.html, game.js, _headers (CSP and security headers)
+├── public/                    # index.html, game.js, favicon, _headers (CSP and security headers)
 ├── test/                      # Vitest (unit + Durable Object integration)
+├── e2e/                       # Playwright end-to-end scripts
+├── scripts/screenshots.mjs    # README screenshots
 └── wrangler.jsonc
 ```
 
-## 🎨 Game Features in Detail
+## Deployment
 
-### Drawing Tools
-- **Brush Sizes**: Multiple brush sizes for different drawing styles
-- **Color Palette**: Full spectrum of colors available
-- **Fill Tool**: Quickly fill areas with selected color
-- **Undo/Clear**: Undo the last stroke (Ctrl/Cmd+Z) or clear the canvas
+Run `npm run deploy`. You don't need any secrets or extra resources. The Durable Objects and rate
+limiters are declared in `wrangler.jsonc`.
 
-### Room Management
-- **Room Codes**: 6-character codes without look-alike characters, plus shareable `/room/CODE` links
-- **Owner Controls**: Room creator can start games and manage players
-- **Auto-ownership Transfer**: If room owner leaves, ownership transfers automatically
-- **Player Moderation**: Remove disruptive players; they can't rejoin that room
+## License
 
-### Word System
-- **Diverse Word List**: 200+ words including popular culture references
-- **Categories**: Animals, food, movies/TV, video games, sports, technology, and more
-- **Custom Words**: Room owners can add custom word lists
-- **Smart Selection**: No word repetition within the same game
-
-## 🌐 Deployment
-
-`npm run deploy`. No secrets or extra resources are needed: Durable Objects and rate limiters are
-declared in `wrangler.jsonc`.
-
-## 🤝 Contributing
-
-This is a fun multiplayer game project! Feel free to suggest improvements or report issues.
-
-## 📜 License
-
-This project is open source and available under the MIT License.
-
----
-
-**Have fun drawing and guessing! 🎨✨**
+MIT. See [LICENSE](LICENSE).

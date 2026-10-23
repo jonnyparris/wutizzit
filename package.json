@@ -1,6 +1,7 @@
 {
 	"name": "wutizzit",
 	"version": "0.0.0",
+	"license": "MIT",
 	"private": true,
 	"scripts": {
 		"build:css": "tailwindcss -i ./src/client/styles.css -o ./public/styles.css --minify",

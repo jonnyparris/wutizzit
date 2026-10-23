@@ -37,8 +37,22 @@ class Client {
 			this.messages.push(msg);
 			this.waiters = this.waiters.filter((w) => (w.pred(msg) ? (w.resolve(msg), false) : true));
 		});
-		ws.addEventListener("close", (e) => {
+		ws.addEventListener('close', (e) => {
 			this.closed = { code: e.code };
+			this.onClose?.();
+		});
+	}
+
+	private onClose?: () => void;
+
+	waitClosed(timeout = 2000): Promise<{ code: number }> {
+		if (this.closed) return Promise.resolve(this.closed);
+		return new Promise((resolve, reject) => {
+			const timer = setTimeout(() => reject(new Error('timed out waiting for close')), timeout);
+			this.onClose = () => {
+				clearTimeout(timer);
+				resolve(this.closed!);
+			};
 		});
 	}
 
@@ -201,9 +215,10 @@ describe('game flow', () => {
 		const [alice, bob] = players;
 		alice.client.send({ type: 'kick', playerId: bob.playerId });
 		await alice.client.state((s) => s.players.length === 1);
-		await new Promise((r) => setTimeout(r, 50));
-		expect(bob.client.closed?.code).toBe(4003);
-		expect((await post(`/rooms/${roomId}/join`, { username: 'Bobby' }, '10.9.9.9')).status).toBe(403);
+		expect((await bob.client.waitClosed()).code).toBe(4003);
+		const banned = await post(`/rooms/${roomId}/join`, { username: 'Bobby' }, '10.9.9.9');
+		expect(banned.status).toBe(403);
+		expect(banned.body.error).toMatch(/Try again in 10 minutes\./);
 		expect((await post(`/rooms/${roomId}/join`, { username: 'Dana' }, '10.8.8.8')).status).toBe(200);
 	});
 
@@ -356,8 +371,9 @@ describe('edge cases', () => {
 	it('resyncs a drawer who exceeds the draw rate', async () => {
 		const { players } = await setupRoom(['Alice', 'Bob']);
 		const { drawer } = await startDrawing(players);
-		for (let i = 0; i < 260; i++) drawer.client.send({ type: 'draw', op: { k: 'line', s: 1, c: '#000000', w: 3, p: [1, 1, 2, 2] } });
-		await drawer.client.next((m) => m.type === 'resync');
+		// Far past the 200-op burst so a slow runner can't refill the bucket in time.
+		for (let i = 0; i < 1000; i++) drawer.client.send({ type: 'draw', op: { k: 'line', s: 1, c: '#000000', w: 3, p: [1, 1, 2, 2] } });
+		await drawer.client.next((m) => m.type === 'resync', 5000);
 	});
 });
 
