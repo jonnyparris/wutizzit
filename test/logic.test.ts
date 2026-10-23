@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+	containsWord,
 	cleanCustomWords,
 	cleanDrawOp,
 	cleanSettings,
@@ -18,6 +19,16 @@ describe('guess matching', () => {
 		expect(isWordMatch('café', 'cafe')).toBe(true);
 		expect(isWordMatch('', 'cat')).toBe(false);
 		expect(isWordMatch('cats', 'cat')).toBe(false);
+	});
+
+	it('detects the word inside a sentence, as whole words only', () => {
+		expect(containsWord('is it a cat?', 'cat')).toBe(true);
+		expect(containsWord('PAC-MAN!!', 'pac man')).toBe(true);
+		expect(containsWord('maybe pac man', 'pac man')).toBe(true);
+		expect(containsWord('scarf', 'car')).toBe(false);
+		expect(containsWord('start', 'star')).toBe(false);
+		expect(containsWord('street', 'tree')).toBe(false);
+		expect(containsWord('cathedral', 'cat')).toBe(false);
 	});
 
 	it('flags near misses only', () => {

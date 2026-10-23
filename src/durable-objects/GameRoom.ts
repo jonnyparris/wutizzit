@@ -8,6 +8,7 @@ import {
 	DEFAULT_SETTINGS,
 	DRAWER_POINTS_PER_GUESS,
 	guesserPoints,
+	containsWord,
 	isCloseGuess,
 	isWordMatch,
 	letterIndices,
@@ -28,10 +29,16 @@ const CHOOSE_MS = 15_000;
 const INTERMISSION_MS = 5_000;
 /** How long a dropped player keeps their seat (and score) before being removed. */
 const RECONNECT_GRACE_MS = 30_000;
+/** A seat reserved by join() but never connected is released quickly, so rooms can't be squatted. */
+const FIRST_CONNECT_MS = 10_000;
+/** Kicks block the kicked network from rejoining for this long (households often share one IP). */
+const BAN_MS = 10 * 60_000;
 /** Empty rooms delete their storage after this long. */
 const EMPTY_ROOM_TTL_MS = 10 * 60_000;
 /** Re-report to GlobalStats at least this often while the room has players. */
 const STATS_HEARTBEAT_MS = 5 * 60_000;
+
+export const WS_PROTOCOL = 'wutizzit';
 
 // WebSocket close codes the client understands. 4xxx = do not auto-reconnect.
 export const CLOSE = {
@@ -56,6 +63,8 @@ interface PlayerRec {
 	/** When a disconnected (or never-connected) player gets removed. */
 	leaveAt: number | null;
 	ipHash: string;
+	/** False until the first WebSocket connects; "joined" is announced then. */
+	seen: boolean;
 }
 
 interface ScoreUpdate {
@@ -100,7 +109,8 @@ interface RoomState {
 	order: string[];
 	/** Remaining drawers in the current rotation. */
 	drawQueue: string[];
-	bannedIps: string[];
+	/** ipHash → ban expiry. */
+	bans: Record<string, number>;
 	round: RoundRec | null;
 	roundNumber: number;
 	usedWords: string[];
@@ -136,11 +146,20 @@ export class GameRoomObject extends DurableObject<Env> {
 	/** In-memory only: resets on hibernation, which is fine for flood control. */
 	private buckets = new Map<string, { tokens: number; at: number }>();
 	private opCount: number | null = null;
+	/** Drawers owed a resync that was throttled; sent on their next accepted op. */
+	private resyncPending = new Set<string>();
+	/** Set once the "canvas full" resync went out, so a drawer hammering a full canvas gets it once. */
+	private canvasFullNotified = false;
 
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
 		// Synchronous KV API (SQLite-backed DOs): no await, no blockConcurrencyWhile needed.
 		this.state = ctx.storage.kv.get<RoomState>('state') ?? null;
+		if (this.state) {
+			// Defensive backfill in case a room was persisted by an earlier schema.
+			this.state.bans ??= {};
+			for (const p of Object.values(this.state.players)) p.seen ??= true;
+		}
 		// Only touch storage for rooms that exist, so probing random codes stays free.
 		if (this.state) this.ensureSchema();
 		// Keep-alive pings are answered without waking a hibernating object.
@@ -170,7 +189,7 @@ export class GameRoomObject extends DurableObject<Env> {
 			players: {},
 			order: [],
 			drawQueue: [],
-			bannedIps: [],
+			bans: {},
 			round: null,
 			roundNumber: 0,
 			usedWords: [],
@@ -213,7 +232,9 @@ export class GameRoomObject extends DurableObject<Env> {
 			}
 		}
 
-		if (s.bannedIps.includes(input.ipHash)) return { ok: false, status: 403, error: 'You were removed from this room.' };
+		if ((s.bans[input.ipHash] ?? 0) > Date.now()) {
+			return { ok: false, status: 403, error: 'You were removed from this room. Try again in a few minutes.' };
+		}
 		if (s.order.length >= LIMITS.maxPlayers) return { ok: false, status: 409, error: 'Room is full.' };
 		if (nameTaken()) return { ok: false, status: 409, error: 'That username is taken in this room.' };
 
@@ -223,15 +244,16 @@ export class GameRoomObject extends DurableObject<Env> {
 			username,
 			score: 0,
 			connected: false,
-			leaveAt: Date.now() + RECONNECT_GRACE_MS,
+			leaveAt: Date.now() + FIRST_CONNECT_MS,
 			ipHash: input.ipHash,
+			seen: false,
 		};
 		s.players[player.id] = player;
 		s.order.push(player.id);
 		if (s.phase !== 'lobby') s.drawQueue.push(player.id);
 		s.ownerId ??= player.id;
 		s.emptySince = null;
-		this.system(`👋 ${username} joined`);
+		this.reportStats();
 		await this.commit();
 		this.broadcastState();
 		return { ok: true, playerId: player.id, token: player.token, roomId: s.roomId };
@@ -244,14 +266,17 @@ export class GameRoomObject extends DurableObject<Env> {
 		if (request.headers.get('Upgrade') !== 'websocket') return new Response('Expected WebSocket', { status: 426 });
 
 		const { 0: client, 1: server } = new WebSocketPair();
-		const token = new URL(request.url).searchParams.get('token');
+		// The token travels as a WebSocket subprotocol ("wutizzit, <token>") so it never appears in URLs or logs.
+		const protocols = (request.headers.get('Sec-WebSocket-Protocol') ?? '').split(',').map((p) => p.trim());
+		const token = protocols[0] === WS_PROTOCOL ? protocols[1] : undefined;
+		const upgrade = { status: 101, webSocket: client, headers: { 'Sec-WebSocket-Protocol': WS_PROTOCOL } };
 		const s = this.state;
 		const player = s && token ? s.order.map((id) => s.players[id]).find((p) => p.token === token) : undefined;
 
 		this.ctx.acceptWebSocket(server, player ? [player.id] : []);
 		if (!s || !player) {
 			server.close(s ? CLOSE.invalidSession : CLOSE.roomClosed, s ? 'Session expired' : 'Room closed');
-			return new Response(null, { status: 101, webSocket: client });
+			return new Response(null, upgrade);
 		}
 
 		// One live socket per player: a new tab replaces the old one.
@@ -263,6 +288,10 @@ export class GameRoomObject extends DurableObject<Env> {
 		const wasConnected = player.connected;
 		player.connected = true;
 		player.leaveAt = null;
+		if (!player.seen) {
+			player.seen = true;
+			this.system(`👋 ${player.username} joined`);
+		}
 		if (!wasConnected) this.broadcastState(player.id);
 		await this.commit();
 
@@ -274,7 +303,7 @@ export class GameRoomObject extends DurableObject<Env> {
 				ops: this.loadOps(),
 			}),
 		);
-		return new Response(null, { status: 101, webSocket: client });
+		return new Response(null, upgrade);
 	}
 
 	async webSocketMessage(ws: WebSocket, raw: string | ArrayBuffer): Promise<void> {
@@ -292,7 +321,9 @@ export class GameRoomObject extends DurableObject<Env> {
 
 		switch (msg.type) {
 			case 'draw':
-				if (this.allow(`d:${playerId}`, 120, 60)) this.onDraw(playerId, msg.op);
+				// Client flushes at most ~30/s; leave plenty of headroom so legit strokes are never dropped.
+				if (this.allow(`d:${playerId}`, 200, 90)) this.onDraw(ws, playerId, msg.op);
+				else if (this.state?.round?.drawerId === playerId) this.resync(ws, playerId);
 				return;
 			case 'chat':
 				if (this.allow(`c:${playerId}`, 6, 1)) await this.onChat(playerId, msg.text);
@@ -357,9 +388,14 @@ export class GameRoomObject extends DurableObject<Env> {
 	// -------------------------------------------------------------------------
 	// Message handlers
 
-	private onDraw(playerId: string, raw: unknown) {
+	private onDraw(ws: WebSocket, playerId: string, raw: unknown) {
 		const s = this.state!;
-		if (s.phase !== 'drawing' || s.pausedAt !== null || s.round?.drawerId !== playerId) return;
+		if (s.round?.drawerId !== playerId) return;
+		if (s.phase !== 'drawing' || s.pausedAt !== null) {
+			// A stroke was in flight when the game paused: bring the drawer back in line.
+			if (s.phase === 'drawing') this.resync(ws, playerId);
+			return;
+		}
 		const op = cleanDrawOp(raw);
 		if (!op) return;
 
@@ -367,16 +403,26 @@ export class GameRoomObject extends DurableObject<Env> {
 		if (op.k === 'clear') {
 			sql.exec('DELETE FROM ops');
 			this.opCount = 0;
+			this.canvasFullNotified = false;
 		} else if (op.k === 'undo') {
 			sql.exec('DELETE FROM ops WHERE stroke = (SELECT MAX(stroke) FROM ops)');
 			this.opCount = null;
+			this.canvasFullNotified = false;
 		} else {
 			this.opCount ??= sql.exec<{ n: number }>('SELECT COUNT(*) AS n FROM ops').one().n;
-			if (this.opCount >= LIMITS.maxOpsPerRound) return;
+			if (this.opCount >= LIMITS.maxOpsPerRound) {
+				if (!this.canvasFullNotified) {
+					this.canvasFullNotified = true;
+					this.send(ws, { type: 'resync', ops: this.loadOps() });
+					this.send(ws, { type: 'notice', text: '🖼️ The canvas is full! Undo or clear to keep drawing.' });
+				}
+				return;
+			}
 			sql.exec('INSERT INTO ops (stroke, data) VALUES (?, ?)', op.s, JSON.stringify(op));
 			this.opCount++;
 		}
 		this.broadcastRaw(JSON.stringify({ type: 'draw', op }), playerId);
+		if (this.resyncPending.has(playerId)) this.resync(ws, playerId);
 	}
 
 	private async onChat(playerId: string, rawText: unknown) {
@@ -385,6 +431,7 @@ export class GameRoomObject extends DurableObject<Env> {
 		const text = cleanChat(rawText);
 		if (!text) return;
 		const round = s.round;
+		if (s.pausedAt !== null) return this.sendTo(playerId, { type: 'notice', text: 'The game is paused ⏸️' });
 
 		// Outside of drawing, chat is just chat.
 		if (s.phase !== 'drawing' || !round?.word) {
@@ -395,6 +442,7 @@ export class GameRoomObject extends DurableObject<Env> {
 
 		// The drawer and players who already guessed talk in a private channel so they can't leak the word.
 		if (round.drawerId === playerId || round.guessed.includes(playerId)) {
+			// Deliberately stricter than containsWord(): "cats" or "bobcat" would still give the word away.
 			if (round.drawerId === playerId && normalizeGuess(text).includes(normalizeGuess(round.word))) {
 				this.sendTo(playerId, { type: 'notice', text: "Nice try! You can't say the word 🤫" });
 				return;
@@ -422,7 +470,9 @@ export class GameRoomObject extends DurableObject<Env> {
 			return;
 		}
 
-		if (isCloseGuess(text, round.word)) this.sendTo(playerId, { type: 'notice', text: `"${text}" is close! 🔥` });
+		// Near misses and guesses that contain the word ("is it a cat?") would give it away: keep them private.
+		if (containsWord(text, round.word)) return this.sendTo(playerId, { type: 'notice', text: `"${text}" is very close! Just the word, please 🔥` });
+		if (isCloseGuess(text, round.word)) return this.sendTo(playerId, { type: 'notice', text: `"${text}" is close! 🔥` });
 		this.pushChat({ id: generateId(), ts: Date.now(), kind: 'chat', playerId, username: player.username, text });
 		await this.commit();
 	}
@@ -484,7 +534,9 @@ export class GameRoomObject extends DurableObject<Env> {
 		if (s.ownerId !== requesterId || typeof targetId !== 'string' || targetId === requesterId) return;
 		const target = s.players[targetId];
 		if (!target) return;
-		if (!s.bannedIps.includes(target.ipHash)) s.bannedIps.push(target.ipHash);
+		const now = Date.now();
+		for (const [ip, until] of Object.entries(s.bans)) if (until <= now) delete s.bans[ip];
+		s.bans[target.ipHash] = now + BAN_MS;
 		for (const ws of this.ctx.getWebSockets(targetId)) this.safeClose(ws, CLOSE.kicked, 'Removed by room owner');
 		await this.removePlayer(targetId, 'kicked');
 	}
@@ -511,7 +563,7 @@ export class GameRoomObject extends DurableObject<Env> {
 		s.drawQueue = s.drawQueue.filter((id) => s.players[id]);
 		if (!s.drawQueue.some(connected)) s.drawQueue = [...s.order];
 		const drawerId = s.drawQueue.find(connected);
-		if (!drawerId || s.order.filter(connected).length < 2) return this.finishGame('Not enough players');
+		if (!drawerId || s.order.length < 2) return this.finishGame('Not enough players');
 		s.drawQueue = s.drawQueue.filter((id) => id !== drawerId);
 
 		const used = new Set(s.usedWords);
@@ -535,6 +587,8 @@ export class GameRoomObject extends DurableObject<Env> {
 		s.pausedAt = null;
 		this.ctx.storage.sql.exec('DELETE FROM ops');
 		this.opCount = 0;
+		this.canvasFullNotified = false;
+		this.resyncPending.clear();
 		this.broadcastState();
 		this.reportStats(true);
 	}
@@ -573,20 +627,26 @@ export class GameRoomObject extends DurableObject<Env> {
 		const s = this.state!;
 		const round = s.round;
 		if (!round) return;
-		const word = round.word ?? pickRandom(round.choices);
-		s.lastRound = { word, drawerId: round.drawerId, scoreUpdates: round.scoreUpdates, drawerPoints: round.drawerPoints };
+		const word = round.word;
+		s.lastRound = word ? { word, drawerId: round.drawerId, scoreUpdates: round.scoreUpdates, drawerPoints: round.drawerPoints } : null;
 		s.round = null;
 		s.phase = 'intermission';
 		s.deadline = Date.now() + INTERMISSION_MS;
 		s.pausedAt = null;
-		this.system(`${reason} The word was "${word}".`);
+		this.system(word ? `${reason} The word was "${word}".` : `${reason} Skipping this turn.`);
 		this.broadcastState();
 	}
 
 	private nextRoundOrFinish() {
 		const s = this.state!;
-		if (s.roundNumber >= s.settings.maxRounds) this.finishGame();
-		else this.startRound();
+		if (s.roundNumber >= s.settings.maxRounds) return this.finishGame();
+		// Someone is mid-reconnect: wait for them rather than ending the game. If their seat
+		// expires, removePlayer() ends the game instead.
+		if (s.order.filter((id) => s.players[id].connected).length < 2) {
+			s.deadline = Date.now() + 2_000;
+			return;
+		}
+		this.startRound();
 	}
 
 	private finishGame(reason?: string) {
@@ -616,9 +676,11 @@ export class GameRoomObject extends DurableObject<Env> {
 		s.drawQueue = s.drawQueue.filter((id) => id !== playerId);
 		this.buckets.delete(`c:${playerId}`);
 		this.buckets.delete(`d:${playerId}`);
+		this.buckets.delete(`r:${playerId}`);
+		this.resyncPending.delete(playerId);
 
 		const verb = why === 'kicked' ? 'was removed' : why === 'timeout' ? 'disconnected' : 'left';
-		this.system(`🚪 ${player.username} ${verb}`);
+		if (player.seen) this.system(`🚪 ${player.username} ${verb}`);
 
 		if (s.ownerId === playerId) {
 			s.ownerId = s.order.find((id) => s.players[id].connected) ?? s.order[0] ?? null;
@@ -765,6 +827,24 @@ export class GameRoomObject extends DurableObject<Env> {
 		} catch {
 			// Already closed.
 		}
+	}
+
+	/** A drawer's op was dropped: send them the authoritative canvas (throttled, it can be large). */
+	private resync(ws: WebSocket, playerId: string) {
+		if (!this.allow(`r:${playerId}`, 1, 0.5)) {
+			if (!this.resyncPending.has(playerId)) {
+				this.resyncPending.add(playerId);
+				// Deliver once the bucket refills even if the drawer stops drawing. Best effort: a busy
+				// drawing room doesn't hibernate within 2s, and a reconnect's welcome resyncs anyway.
+				setTimeout(() => {
+					if (!this.resyncPending.has(playerId)) return;
+					for (const sock of this.ctx.getWebSockets(playerId)) this.resync(sock, playerId);
+				}, 2_100);
+			}
+			return;
+		}
+		this.resyncPending.delete(playerId);
+		this.send(ws, { type: 'resync', ops: this.loadOps() });
 	}
 
 	/** Token bucket: `burst` messages, refilled at `perSecond`. */

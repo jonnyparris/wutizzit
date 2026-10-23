@@ -17,7 +17,8 @@ export const LIMITS = {
 	canvasHeight: 500,
 	maxBrush: 40,
 	maxPointsPerOp: 512,
-	maxOpsPerRound: 5000,
+	// Client flushes at most ~30 ops/s, so this covers a 3-minute round of non-stop drawing.
+	maxOpsPerRound: 8000,
 } as const;
 
 /** Lowercase, strip accents, punctuation and whitespace so "Pac-Man" == "pac man" == "pacman". */
@@ -50,6 +51,25 @@ export function editDistance(a: string, b: string, max = 3): number {
 		prev = cur;
 	}
 	return prev[b.length];
+}
+
+/**
+ * True when a run of consecutive words in the guess spells the word, ignoring spacing and
+ * punctuation: "is it a cat?" and "c a t" match "cat", "PAC-MAN!!" matches "pac man".
+ * "scarf" does not match "car". Such guesses must not be broadcast.
+ */
+export function containsWord(guess: string, word: string): boolean {
+	const w = normalizeGuess(word);
+	if (w.length < 3) return false;
+	const tokens = guess.split(/[^\p{L}\p{N}]+/u).map(normalizeGuess).filter(Boolean);
+	for (let i = 0; i < tokens.length; i++) {
+		let joined = '';
+		for (let j = i; j < tokens.length && joined.length < w.length; j++) {
+			joined += tokens[j];
+			if (joined === w) return true;
+		}
+	}
+	return false;
 }
 
 /** "So close!" feedback: one typo away for short words, two for long ones. */

@@ -178,9 +178,12 @@ class DrawingBoard {
 		this.strokeSeq = 0;
 		this.active = null; // { id, s, points: [], sent: number, op }
 		this.flushScheduled = false;
+		this.lastFlush = 0;
 		this.lobbyArt = false;
 
-		this.dpr = Math.min(2, window.devicePixelRatio || 1);
+		// Fixed 2x backing store on every device, so flood fills land on identical pixels everywhere.
+		// Costs ~6.4 MB of canvas memory on 1x screens; worth it for consistency.
+		this.dpr = 2;
 		canvas.width = CANVAS_W * this.dpr;
 		canvas.height = CANVAS_H * this.dpr;
 		this.reset();
@@ -375,11 +378,13 @@ class DrawingBoard {
 	scheduleFlush() {
 		if (this.flushScheduled) return;
 		this.flushScheduled = true;
-		// Batch points into one message per frame instead of one per mousemove.
-		requestAnimationFrame(() => {
+		// Batch points into at most ~30 messages/s (whatever the display refresh rate) instead of one per mousemove.
+		const wait = Math.max(0, 33 - (performance.now() - this.lastFlush));
+		setTimeout(() => {
 			this.flushScheduled = false;
+			this.lastFlush = performance.now();
 			this.flush();
-		});
+		}, wait);
 	}
 
 	flush() {
@@ -466,8 +471,10 @@ class Connection {
 		this.closedByUs = false;
 	}
 
-	open(url) {
+	open(url, token) {
+		this.close();
 		this.url = url;
+		this.token = token;
 		this.closedByUs = false;
 		this.attempt = 0;
 		this.connect();
@@ -476,7 +483,8 @@ class Connection {
 	connect() {
 		clearTimeout(this.timers.retry);
 		const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-		const ws = new WebSocket(`${proto}//${location.host}${this.url}`);
+		// The session token rides in the subprotocol header so it never shows up in URLs or logs.
+		const ws = new WebSocket(`${proto}//${location.host}${this.url}`, ['wutizzit', this.token]);
 		this.ws = ws;
 		this.onStatus(this.attempt === 0 ? 'connecting' : 'reconnecting');
 
@@ -486,6 +494,7 @@ class Connection {
 			this.startHeartbeat();
 		});
 		ws.addEventListener('message', (e) => {
+			if (this.ws !== ws) return;
 			if (e.data === 'pong') {
 				clearTimeout(this.timers.pongWait);
 				return;
@@ -497,8 +506,8 @@ class Connection {
 			}
 		});
 		ws.addEventListener('close', (e) => {
-			this.stopHeartbeat();
 			if (this.ws !== ws) return;
+			this.stopHeartbeat();
 			this.ws = null;
 			if (this.closedByUs) return;
 			if (e.code >= 4000 && e.code < 5000) return this.onFatal(e.code, e.reason);
@@ -519,8 +528,17 @@ class Connection {
 			if (this.ws?.readyState !== WebSocket.OPEN) return;
 			this.ws.send('ping');
 			clearTimeout(this.timers.pongWait);
-			// No pong in 10s: the socket is dead even if the browser hasn't noticed.
-			this.timers.pongWait = setTimeout(() => this.ws?.close(), 10_000);
+			// No pong in 10s: the socket is dead even if the browser hasn't noticed. Drop it and
+			// reconnect now rather than waiting for the browser's close handshake to time out.
+			this.timers.pongWait = setTimeout(() => {
+				const dead = this.ws;
+				this.ws = null;
+				this.stopHeartbeat();
+				try {
+					dead?.close();
+				} catch {}
+				this.scheduleRetry();
+			}, 10_000);
 		}, 25_000);
 	}
 
@@ -640,6 +658,7 @@ class GameClient {
 		if (m) {
 			const roomId = m[1].toUpperCase();
 			if (this.roomId === roomId) return;
+			if (this.roomId) this.leave(false);
 			this.el.roomInput.value = roomId;
 			// Returning to a room in this tab (refresh): rejoin straight away.
 			if (session.get(roomId)) return this.join(roomId);
@@ -750,7 +769,7 @@ class GameClient {
 			if (location.pathname !== `/room/${roomId}`) history.pushState({ roomId }, '', `/room/${roomId}`);
 			document.title = `Room ${roomId} · Wutizzit`;
 			this.showGame();
-			this.conn.open(`/rooms/${roomId}/ws?token=${encodeURIComponent(data.token)}`);
+			this.conn.open(`/rooms/${roomId}/ws`, data.token);
 		} catch (err) {
 			this.showHome(err.message);
 		} finally {
@@ -840,6 +859,15 @@ class GameClient {
 			case 'draw':
 				this.board.apply(msg.op);
 				break;
+			case 'resync': {
+				// The server dropped one of our ops (flood control or full canvas): match its picture,
+				// but never reuse stroke ids, or a later undo would remove two strokes.
+				const seq = this.board.strokeSeq;
+				this.board.load(msg.ops);
+				this.board.strokeSeq = Math.max(seq, this.board.strokeSeq);
+				this.updateUndo();
+				break;
+			}
 			case 'notice':
 				this.addChat({ kind: 'notice', text: msg.text, ts: Date.now() }, false);
 				if (msg.text.includes('close')) this.sound.play('close');
@@ -924,6 +952,9 @@ class GameClient {
 		if (s.phase === 'choosing') {
 			const drawer = s.players.find((p) => p.id === round?.drawerId);
 			return this.showOverlay(h('p', { class: 'text-4xl', text: avatarFor(round?.drawerId ?? '') }), h('p', { class: 'text-xl font-semibold', text: `${drawer?.username ?? 'Someone'} is choosing a word…` }));
+		}
+		if (s.phase === 'intermission' && !s.lastRound) {
+			return this.showOverlay(h('p', { class: 'text-xl font-semibold', text: '⏭️ Skipping this turn…' }));
 		}
 		if (s.phase === 'intermission' && s.lastRound) {
 			const lr = s.lastRound;
@@ -1062,7 +1093,7 @@ class GameClient {
 	}
 
 	kick(player) {
-		if (confirm(`Remove ${player.username} from the room? They won't be able to rejoin.`)) this.conn.send({ type: 'kick', playerId: player.id });
+		if (confirm(`Remove ${player.username} from the room? Nobody on their network can rejoin for 10 minutes.`)) this.conn.send({ type: 'kick', playerId: player.id });
 	}
 
 	async shareLink() {
