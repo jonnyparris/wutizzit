@@ -1,1975 +1,1284 @@
-class GameClient {
-    constructor() {
-        this.socket = null;
-        this.playerId = null;
-        this.roomId = null;
-        this.isDrawer = false;
-        this.isDrawing = false;
-        this.canvas = null;
-        this.ctx = null;
-        this.audioContext = null;
-        this.isRoomCreator = false;
-        this.currentDrawerId = null;
-        
-        this.init();
-    }
-
-    init() {
-        this.setupElements();
-        this.setupEventListeners();
-        this.setupCanvas();
-        this.generateRandomUsername();
-        this.updateHomePageStats();
-        this.initAudio();
-        this.startStatsRefreshTimer();
-        this.handleUrlRouting();
-        
-        // Handle browser back/forward navigation
-        window.addEventListener('popstate', (event) => {
-            this.handleUrlRouting();
-        });
-    }
-    
-    handleUrlRouting() {
-        const path = window.location.pathname;
-        const roomMatch = path.match(/^\/room\/([A-Z0-9]{6})$/i);
-        
-        if (roomMatch) {
-            const roomId = roomMatch[1].toUpperCase();
-            // Auto-join the room if we have a username and aren't already in a game
-            if (this.usernameInput.value && !this.roomId) {
-                this.roomInput.value = roomId;
-                this.joinRoom(roomId);
-            } else if (!this.usernameInput.value) {
-                // Show room ID in input but don't auto-join until username is provided
-                this.roomInput.value = roomId;
-            }
-        }
-    }
-    
-    updateUrl(roomId) {
-        const newUrl = roomId ? `/room/${roomId}` : '/';
-        if (window.location.pathname !== newUrl) {
-            window.history.pushState({ roomId }, '', newUrl);
-        }
-    }
-    
-    async copyRoomLink() {
-        if (!this.roomId) return;
-        
-        const roomUrl = `${window.location.origin}/room/${this.roomId}`;
-        
-        try {
-            await navigator.clipboard.writeText(roomUrl);
-            // Briefly change button text to show success
-            const originalText = this.copyRoomLinkBtn.innerHTML;
-            this.copyRoomLinkBtn.innerHTML = '✅ Copied!';
-            this.copyRoomLinkBtn.disabled = true;
-            
-            setTimeout(() => {
-                this.copyRoomLinkBtn.innerHTML = originalText;
-                this.copyRoomLinkBtn.disabled = false;
-            }, 2000);
-        } catch (error) {
-            // Fallback for older browsers
-            const textArea = document.createElement('textarea');
-            textArea.value = roomUrl;
-            document.body.appendChild(textArea);
-            textArea.select();
-            try {
-                document.execCommand('copy');
-                this.copyRoomLinkBtn.innerHTML = '✅ Copied!';
-                setTimeout(() => {
-                    this.copyRoomLinkBtn.innerHTML = '📋 Share Link';
-                }, 2000);
-            } catch (fallbackError) {
-                alert(`Copy failed. Room URL: ${roomUrl}`);
-            }
-            document.body.removeChild(textArea);
-        }
-    }
-
-    initAudio() {
-        try {
-            this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
-        } catch (error) {
-            console.warn('Audio not supported:', error);
-        }
-    }
-
-    playSound(frequency, duration = 200, type = 'sine') {
-        if (!this.audioContext) return;
-        
-        try {
-            const oscillator = this.audioContext.createOscillator();
-            const gainNode = this.audioContext.createGain();
-            
-            oscillator.connect(gainNode);
-            gainNode.connect(this.audioContext.destination);
-            
-            oscillator.frequency.setValueAtTime(frequency, this.audioContext.currentTime);
-            oscillator.type = type;
-            
-            gainNode.gain.setValueAtTime(0.1, this.audioContext.currentTime);
-            gainNode.gain.exponentialRampToValueAtTime(0.01, this.audioContext.currentTime + duration / 1000);
-            
-            oscillator.start(this.audioContext.currentTime);
-            oscillator.stop(this.audioContext.currentTime + duration / 1000);
-        } catch (error) {
-            console.warn('Failed to play sound:', error);
-        }
-    }
-
-    playSoundEffect(effect) {
-        switch (effect) {
-            case 'correct-guess':
-                this.playSound(523, 300); // C5 note
-                setTimeout(() => this.playSound(659, 300), 100); // E5 note
-                setTimeout(() => this.playSound(784, 400), 200); // G5 note
-                break;
-            case 'wrong-guess':
-                this.playSound(200, 150); // Low buzz
-                break;
-            case 'round-end':
-                this.playSound(330, 200); // E4
-                setTimeout(() => this.playSound(262, 400), 300); // C4
-                break;
-            case 'game-start':
-                this.playSound(392, 150); // G4
-                setTimeout(() => this.playSound(523, 150), 200); // C5
-                setTimeout(() => this.playSound(659, 300), 400); // E5
-                break;
-            case 'player-join':
-                this.playSound(440, 150); // A4
-                break;
-            case 'timer-warning':
-                this.playSound(800, 100); // High beep
-                break;
-            case 'timer-tick':
-                this.playSound(600, 80); // Short tick
-                break;
-        }
-    }
-
-    async updateHomePageStats() {
-        try {
-            const [statsResponse, gamesResponse] = await Promise.all([
-                fetch('/api/stats'),
-                fetch('/api/active-games')
-            ]);
-            
-            const stats = await statsResponse.json();
-            const activeGamesData = await gamesResponse.json();
-            
-            document.getElementById('active-games').textContent = stats.activeGames || 0;
-            document.getElementById('total-players').textContent = stats.totalPlayers || 0;
-            
-            // Show real active games
-            const gamesContainer = document.getElementById('games-container');
-            const activeGamesList = document.getElementById('active-games-list');
-            
-            if (activeGamesData.games && activeGamesData.games.length > 0) {
-                gamesContainer.innerHTML = '';
-                activeGamesData.games.forEach(game => {
-                    const gameDiv = document.createElement('div');
-                    gameDiv.className = 'p-2 bg-white rounded border cursor-pointer hover:bg-gray-50';
-                    
-                    const statusText = game.gameStarted 
-                        ? `${game.playerCount} players • In game`
-                        : `${game.playerCount} players • Waiting to start`;
-                    
-                    gameDiv.innerHTML = `
-                        <div class="flex justify-between items-center">
-                            <div>
-                                <div class="font-medium text-sm">${game.id}</div>
-                                <div class="text-xs text-gray-500">${statusText}</div>
-                            </div>
-                            <button class="px-2 py-1 bg-blue-500 text-white text-xs rounded hover:bg-blue-600">
-                                Join
-                            </button>
-                        </div>
-                    `;
-                    gameDiv.onclick = () => {
-                        this.roomInput.value = game.id;
-                        this.joinRoom(game.id);
-                    };
-                    gamesContainer.appendChild(gameDiv);
-                });
-                activeGamesList.classList.remove('hidden');
-            } else {
-                activeGamesList.classList.add('hidden');
-            }
-        } catch (error) {
-            console.error('Failed to fetch stats:', error);
-            // Fallback to static numbers
-            document.getElementById('active-games').textContent = '0';
-            document.getElementById('total-players').textContent = '0';
-        }
-    }
-
-    startStatsRefreshTimer() {
-        // Clear existing timer if it exists
-        if (this.statsRefreshInterval) {
-            clearInterval(this.statsRefreshInterval);
-        }
-        
-        // Update stats every 5 seconds when on homepage
-        this.statsRefreshInterval = setInterval(() => {
-            // Only refresh if we're on the homepage
-            if (!this.homeScreen.classList.contains('hidden')) {
-                this.updateHomePageStats();
-            }
-        }, 5000);
-    }
-
-    stopStatsRefreshTimer() {
-        if (this.statsRefreshInterval) {
-            clearInterval(this.statsRefreshInterval);
-            this.statsRefreshInterval = null;
-        }
-    }
-
-    generateRandomUsername() {
-        const adjectives = [
-            'Sneaky', 'Mighty', 'Swift', 'Brave', 'Clever', 'Cosmic', 'Magic', 'Royal',
-            'Silent', 'Golden', 'Silver', 'Wild', 'Dancing', 'Singing', 'Flying', 'Wise',
-            'Ancient', 'Mysterious', 'Legendary', 'Epic', 'Daring', 'Fearless', 'Noble',
-            // More cheeky/funny adjectives
-            'Giggling', 'Wobbly', 'Dizzy', 'Bouncy', 'Funky', 'Quirky', 'Wacky', 'Silly',
-            'Sparkly', 'Fluffy', 'Bubbly', 'Sassy', 'Cheeky', 'Grumpy', 'Sleepy', 'Happy',
-            'Snappy', 'Perky', 'Zippy', 'Peppy', 'Jolly', 'Merry', 'Cheerful', 'Spunky',
-            'Zesty', 'Fizzy', 'Crispy', 'Crusty', 'Mushy', 'Squishy', 'Slippery', 'Sticky',
-            'Jiggly', 'Wiggly', 'Wrinkly', 'Lumpy', 'Bumpy', 'Jumpy', 'Loopy', 'Goofy'
-        ];
-        
-        const celebrities = [
-            // Historical Figures
-            'Einstein', 'Cleopatra', 'Napoleon', 'Shakespeare', 'DaVinci', 'Mozart', 'Beethoven',
-            // Fictional Characters
-            'Gandalf', 'Yoda', 'Batman', 'Superman', 'Hermione', 'Dumbledore', 'Sherlock',
-            'Aragorn', 'Legolas', 'Frodo', 'Spiderman', 'Ironman', 'Thor', 'Hulk',
-            'Pikachu', 'Mario', 'Luigi', 'Zelda', 'Link', 'Sonic', 'Kirby',
-            'Elsa', 'Anna', 'Simba', 'Nemo', 'Woody', 'Buzz', 'Shrek', 'Donkey',
-            'Mickey', 'Minnie', 'Donald', 'Goofy', 'Scrooge', 'Winnie', 'Tigger',
-            'Garfield', 'Snoopy', 'Charlie', 'Homer', 'Bart', 'Lisa', 'Marge',
-            // Mythological
-            'Zeus', 'Athena', 'Apollo', 'Artemis', 'Hercules', 'Perseus', 'Achilles',
-            'Odin', 'Thor', 'Loki', 'Freya', 'Merlin', 'Arthur', 'Excalibur',
-            // More cheeky/fun characters
-            'Spongebob', 'Patrick', 'Squidward', 'Krabs', 'Plankton', 'Sandy',
-            'Waldo', 'Grinch', 'Cookie', 'Monster', 'Elmo', 'Big', 'Bird', 'Oscar',
-            'Kermit', 'Piggy', 'Gonzo', 'Fozzie', 'Animal', 'Swedish', 'Chef',
-            'Scooby', 'Shaggy', 'Velma', 'Daphne', 'Fred', 'Scrappy',
-            'Pink', 'Panther', 'Inspector', 'Gadget', 'Penny', 'Brain',
-            'Tom', 'Jerry', 'Tweety', 'Sylvester', 'Bugs', 'Bunny', 'Daffy',
-            'Porky', 'Pepe', 'Speedy', 'Foghorn', 'Leghorn', 'Yosemite', 'Sam',
-            'Road', 'Runner', 'Coyote', 'Pepsi', 'Cola', 'Taco', 'Bell'
-        ];
-        
-        const adjective = adjectives[Math.floor(Math.random() * adjectives.length)];
-        const celebrity = celebrities[Math.floor(Math.random() * celebrities.length)];
-        
-        this.usernameInput.placeholder = `e.g. ${adjective}${celebrity}`;
-        this.usernameInput.value = `${adjective}${celebrity}`;
-    }
-
-    generatePlayerAvatar(playerId) {
-        const avatars = [
-            '🐱', '🐶', '🐭', '🐹', '🐰', '🦊', '🐻', '🐼', '🐨', '🐯', 
-            '🦁', '🐮', '🐷', '🐸', '🐵', '🐔', '🐧', '🐦', '🐤', '🦆',
-            '🦋', '🐛', '🐝', '🐞', '🦄', '🐲', '👽', '🤖', '🎭', '🎪'
-        ];
-        
-        // Use playerId as seed for consistent avatar per player
-        let hash = 0;
-        for (let i = 0; i < playerId.length; i++) {
-            const char = playerId.charCodeAt(i);
-            hash = ((hash << 5) - hash) + char;
-            hash = hash & hash; // Convert to 32bit integer
-        }
-        
-        return avatars[Math.abs(hash) % avatars.length];
-    }
-
-    setupElements() {
-        // Home screen elements
-        this.homeScreen = document.getElementById('home-screen');
-        this.gameScreen = document.getElementById('game-screen');
-        this.usernameInput = document.getElementById('username-input');
-        this.roomInput = document.getElementById('room-input');
-        this.createRoomBtn = document.getElementById('create-room-btn');
-        this.joinRoomBtn = document.getElementById('join-room-btn');
-
-        // Game screen elements
-        this.roomIdDisplay = document.getElementById('room-id-display');
-        this.gameStatus = document.getElementById('game-status');
-        this.timer = document.getElementById('timer');
-        this.roundInfo = document.getElementById('round-info');
-        this.wordDisplay = document.getElementById('word-display');
-        this.currentWord = document.getElementById('current-word');
-        this.wordHint = document.getElementById('word-hint');
-        this.hintText = document.getElementById('hint-text');
-        this.letterCount = document.getElementById('letter-count');
-        this.wordChoice = document.getElementById('word-choice');
-        this.choiceTimer = document.getElementById('choice-timer');
-        this.drawingTools = document.getElementById('drawing-tools');
-        this.playersListContainer = document.getElementById('players-list');
-        this.chatMessages = document.getElementById('chat-messages');
-        this.chatInput = document.getElementById('chat-input');
-        this.sendChatBtn = document.getElementById('send-chat');
-        this.leaveRoomBtn = document.getElementById('leave-room-btn');
-        this.startGameBtn = document.getElementById('start-game-btn');
-
-        // Drawing tools
-        this.colorPicker = document.getElementById('color-picker');
-        this.brushSize = document.getElementById('brush-size');
-        this.clearCanvasBtn = document.getElementById('clear-canvas');
-        this.undoCanvasBtn = document.getElementById('undo-canvas');
-        this.fillToolBtn = document.getElementById('fill-tool');
-
-        // Canvas
-        this.canvas = document.getElementById('game-canvas');
-        this.ctx = this.canvas.getContext('2d');
-
-        // Game settings (for room creator)
-        this.gameSettings = document.getElementById('game-settings');
-        this.roundsSetting = document.getElementById('rounds-setting');
-        this.durationSetting = document.getElementById('duration-setting');
-        this.wordChoicesSetting = document.getElementById('word-choices-setting');
-        this.wordListBtn = document.getElementById('word-list-btn');
-        this.wordListModal = document.getElementById('word-list-modal');
-        this.customWordsTextarea = document.getElementById('custom-words');
-        this.saveWordsBtn = document.getElementById('save-words-btn');
-        this.cancelWordsBtn = document.getElementById('cancel-words-btn');
-
-        // Winner modal elements
-        this.winnerModal = document.getElementById('winner-modal');
-        this.celebrationGif = document.getElementById('celebration-gif');
-        this.firstPlacePlayer = document.getElementById('first-place-player');
-        this.firstPlaceScore = document.getElementById('first-place-score');
-        this.secondPlacePlayer = document.getElementById('second-place-player');
-        this.secondPlaceScore = document.getElementById('second-place-score');
-        this.thirdPlacePlayer = document.getElementById('third-place-player');
-        this.thirdPlaceScore = document.getElementById('third-place-score');
-        this.closeWinnerModalBtn = document.getElementById('close-winner-modal');
-        this.pauseGameBtn = document.getElementById('pause-game-btn');
-        this.copyRoomLinkBtn = document.getElementById('copy-room-link');
-        
-        // Canvas state stack for undo functionality
-        this.canvasStates = [];
-        this.maxUndoStates = 20;
-        
-        // Fill tool state
-        this.fillMode = false;
-        
-        // Game settings
-        this.maxRounds = 10; // Default, will be updated by server
-        this.statsRefreshInterval = null; // Timer for refreshing homepage stats
-    }
-
-    setupEventListeners() {
-        // Home screen
-        this.createRoomBtn.addEventListener('click', () => this.createRoom());
-        this.joinRoomBtn.addEventListener('click', () => this.joinRoom());
-        this.usernameInput.addEventListener('keypress', (e) => {
-            if (e.key === 'Enter') {
-                if (this.roomInput.value.trim()) {
-                    this.joinRoom();
-                } else {
-                    this.createRoom();
-                }
-            }
-        });
-        this.roomInput.addEventListener('keypress', (e) => {
-            if (e.key === 'Enter') this.joinRoom();
-        });
-
-        // Game screen
-        this.chatInput.addEventListener('keypress', (e) => {
-            if (e.key === 'Enter') this.sendMessage();
-        });
-        this.sendChatBtn.addEventListener('click', () => this.sendMessage());
-        this.leaveRoomBtn.addEventListener('click', () => this.leaveRoom());
-        this.clearCanvasBtn.addEventListener('click', () => this.clearCanvas());
-        this.undoCanvasBtn.addEventListener('click', () => this.undoCanvas());
-        this.fillToolBtn.addEventListener('click', () => this.toggleFillTool());
-        this.startGameBtn.addEventListener('click', () => this.startGame());
-        
-        // Game settings event listeners
-        this.wordListBtn.addEventListener('click', () => this.openWordListModal());
-        this.saveWordsBtn.addEventListener('click', () => this.saveCustomWords());
-        this.cancelWordsBtn.addEventListener('click', () => this.closeWordListModal());
-        this.pauseGameBtn.addEventListener('click', () => this.togglePauseGame());
-        this.copyRoomLinkBtn.addEventListener('click', () => this.copyRoomLink());
-        
-        // Winner modal event listener
-        this.closeWinnerModalBtn.addEventListener('click', () => this.closeWinnerModal());
-        
-        // Color picker event listeners
-        document.addEventListener('click', (e) => {
-            if (e.target.classList.contains('color-swatch')) {
-                this.selectColor(e.target.dataset.color);
-            }
-            if (e.target.classList.contains('ban-player-btn')) {
-                this.banPlayer(e.target.dataset.playerId);
-            }
-        });
-    }
-
-    setupCanvas() {
-        let lastX = 0;
-        let lastY = 0;
-
-        const getMousePos = (e) => {
-            const rect = this.canvas.getBoundingClientRect();
-            const scaleX = this.canvas.width / rect.width;
-            const scaleY = this.canvas.height / rect.height;
-            
-            return {
-                x: (e.clientX - rect.left) * scaleX,
-                y: (e.clientY - rect.top) * scaleY
-            };
-        };
-
-        const getTouchPos = (e) => {
-            const rect = this.canvas.getBoundingClientRect();
-            const scaleX = this.canvas.width / rect.width;
-            const scaleY = this.canvas.height / rect.height;
-            const touch = e.touches[0];
-            
-            return {
-                x: (touch.clientX - rect.left) * scaleX,
-                y: (touch.clientY - rect.top) * scaleY
-            };
-        };
-
-        // Mouse events
-        this.canvas.addEventListener('mousedown', (e) => {
-            if (!this.isDrawer) return;
-            
-            const pos = getMousePos(e);
-            
-            if (this.fillMode) {
-                this.saveCanvasState(); // Save state before fill
-                this.floodFill(Math.floor(pos.x), Math.floor(pos.y));
-                return;
-            }
-            
-            this.saveCanvasState(); // Save state before drawing
-            this.isDrawing = true;
-            lastX = pos.x;
-            lastY = pos.y;
-        });
-
-        this.canvas.addEventListener('mousemove', (e) => {
-            if (!this.isDrawer || !this.isDrawing) return;
-            const pos = getMousePos(e);
-            this.drawStroke(lastX, lastY, pos.x, pos.y, false);
-            lastX = pos.x;
-            lastY = pos.y;
-        });
-
-        this.canvas.addEventListener('mouseup', () => {
-            this.isDrawing = false;
-        });
-
-        // Touch events
-        this.canvas.addEventListener('touchstart', (e) => {
-            e.preventDefault();
-            if (!this.isDrawer) return;
-            
-            const pos = getTouchPos(e);
-            
-            if (this.fillMode) {
-                this.saveCanvasState(); // Save state before fill
-                this.floodFill(Math.floor(pos.x), Math.floor(pos.y));
-                return;
-            }
-            
-            this.saveCanvasState(); // Save state before drawing
-            this.isDrawing = true;
-            lastX = pos.x;
-            lastY = pos.y;
-        });
-
-        this.canvas.addEventListener('touchmove', (e) => {
-            e.preventDefault();
-            if (!this.isDrawer || !this.isDrawing) return;
-            const pos = getTouchPos(e);
-            this.drawStroke(lastX, lastY, pos.x, pos.y, false);
-            lastX = pos.x;
-            lastY = pos.y;
-        });
-
-        this.canvas.addEventListener('touchend', (e) => {
-            e.preventDefault();
-            this.isDrawing = false;
-        });
-    }
-
-    async createRoom() {
-        const username = this.usernameInput.value.trim();
-        if (!username) {
-            alert('Please enter a username');
-            return;
-        }
-
-        try {
-            const response = await fetch('/rooms', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' }
-            });
-
-            const data = await response.json();
-            if (response.ok) {
-                this.roomId = data.roomId;
-                await this.joinExistingRoom(username, this.roomId);
-            } else {
-                alert(data.error || 'Failed to create room');
-            }
-        } catch (error) {
-            console.error('Error creating room:', error);
-            alert('Failed to create room');
-        }
-    }
-
-    async joinRoom() {
-        const username = this.usernameInput.value.trim();
-        const roomId = this.roomInput.value.trim().toUpperCase();
-        
-        if (!username) {
-            alert('Please enter a username');
-            return;
-        }
-
-        if (!roomId) {
-            alert('Please enter a room ID');
-            return;
-        }
-
-        await this.joinExistingRoom(username, roomId);
-    }
-
-    async joinExistingRoom(username, roomId) {
-        try {
-            const response = await fetch(`/rooms/${roomId}/join`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ username })
-            });
-
-            const data = await response.json();
-            if (response.ok) {
-                this.playerId = data.playerId;
-                this.roomId = roomId;
-                this.isCreator = data.isCreator;
-                this.roomIdDisplay.textContent = roomId;
-                
-                // Update URL to reflect the room
-                this.updateUrl(roomId);
-                
-                this.showGameScreen();
-                this.connectWebSocket(data.websocketUrl || `/rooms/${roomId}/ws?playerId=${this.playerId}`);
-                
-                // Show start button and settings for room creator
-                if (data.isCreator && !data.gameStarted) {
-                    this.startGameBtn.classList.remove('hidden');
-                    this.gameSettings.classList.remove('hidden');
-                    this.gameStatus.textContent = '⏳ Waiting for more players. You can start the game when ready.';
-                }
-                
-                // Load lobby background image if game hasn't started
-                if (!data.gameStarted) {
-                    this.loadLobbyBackgroundImage();
-                }
-            } else {
-                alert(data.error || 'Failed to join room');
-            }
-        } catch (error) {
-            console.error('Error joining room:', error);
-            alert('Failed to join room');
-        }
-    }
-
-    connectWebSocket(url) {
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${protocol}//${window.location.host}${url}`;
-        
-        this.socket = new WebSocket(wsUrl);
-        
-        this.socket.onopen = () => {
-            console.log('WebSocket connected');
-            this.gameStatus.textContent = '🔗 Connected! Waiting for game to start...';
-        };
-        
-        this.socket.onmessage = (event) => {
-            try {
-                const message = JSON.parse(event.data);
-                this.handleMessage(message);
-            } catch (error) {
-                console.error('Error parsing WebSocket message:', error);
-            }
-        };
-        
-        this.socket.onclose = (event) => {
-            console.log('WebSocket disconnected', event.code, event.reason);
-            if (!event.wasClean) {
-                this.gameStatus.textContent = '⚠️ Connection lost. Attempting to reconnect...';
-                // Attempt to reconnect after a delay
-                setTimeout(() => {
-                    if (this.roomId && this.playerId) {
-                        this.connectWebSocket(url);
-                    }
-                }, 2000);
-            } else {
-                this.showHomeScreen();
-            }
-        };
-        
-        this.socket.onerror = (error) => {
-            console.error('WebSocket error:', error);
-            this.gameStatus.textContent = '❌ Connection error. Please try refreshing.';
-        };
-    }
-
-    handleMessage(message) {
-        switch (message.type) {
-            case 'game-state':
-                this.updateGameState(message.data);
-                break;
-            case 'join':
-                this.handlePlayerJoin(message.data);
-                break;
-            case 'leave':
-                this.handlePlayerLeave(message.data);
-                break;
-            case 'draw':
-                this.handleDraw(message.data);
-                break;
-            case 'guess':
-                this.handleGuess(message.data);
-                break;
-            case 'round-start':
-                this.handleRoundStart(message.data);
-                break;
-            case 'drawer-word':
-                this.handleDrawerWord(message.data);
-                break;
-            case 'timer-update':
-                this.handleTimerUpdate(message.data);
-                break;
-            case 'round-end':
-                this.handleRoundEnd(message.data);
-                break;
-            case 'word-choice':
-                this.handleWordChoice(message.data);
-                break;
-            case 'round-prepare':
-                this.handleRoundPrepare(message.data);
-                break;
-            case 'game-end':
-                this.handleGameEnd(message.data);
-                break;
-            case 'player-banned':
-                this.handlePlayerBanned(message.data);
-                break;
-            case 'game-pause':
-                this.handleGamePause(message.data);
-                break;
-        }
-    }
-
-    updateGameState(gameState) {
-        // Store players data for score updates
-        this.playersData = gameState.players;
-        this.updatePlayersList(gameState.players);
-        
-        // Update round info even when no active round
-        if (gameState.maxRounds) {
-            this.maxRounds = gameState.maxRounds;
-        }
-        
-        if (gameState.currentRound) {
-            this.updateRound(gameState.currentRound);
-        } else if (gameState.gameStarted && gameState.currentRoundNumber !== undefined) {
-            // Show current round info even between rounds
-            this.roundInfo.textContent = `Round ${gameState.currentRoundNumber} of ${this.maxRounds}`;
-        } else {
-            // Before game starts
-            this.roundInfo.textContent = `Round 0 of ${this.maxRounds}`;
-            // Load lobby background if game hasn't started
-            if (!gameState.gameStarted) {
-                this.loadLobbyBackgroundImage();
-            }
-        }
-        
-        if (gameState.chatMessages) {
-            this.updateChat(gameState.chatMessages);
-        }
-    }
-
-    updatePlayersList(players) {
-        if (!players) return;
-        
-        // Find the highest score for crown emoji
-        const playerArray = Object.values(players);
-        const maxScore = Math.max(...playerArray.map(p => p.score));
-        
-        this.playersListContainer.innerHTML = '';
-        playerArray
-            .sort((a, b) => b.score - a.score) // Sort by score descending
-            .forEach(player => {
-                const isLeader = player.score === maxScore && maxScore > 0;
-                const isCurrentPlayer = player.id === this.playerId;
-                const isCurrentDrawer = player.id === this.currentDrawerId;
-                const playerDiv = document.createElement('div');
-                
-                // Determine styling based on player state
-                let className = 'flex justify-between items-center p-3 player-card ';
-                if (isCurrentDrawer) {
-                    className += 'ring-2 ring-green-400 bg-green-50 border-2 border-green-300';
-                } else if (isCurrentPlayer) {
-                    className += 'ring-2 ring-blue-400 bg-blue-50 border-2 border-blue-300';
-                }
-                playerDiv.className = className;
-                
-                const avatar = this.generatePlayerAvatar(player.id);
-                
-                // Show ban button for room creator (but not for themselves)
-                const canBan = this.isCreator && !isCurrentPlayer;
-                
-                playerDiv.innerHTML = `
-                    <div class="flex items-center gap-2">
-                        <span class="text-lg">${avatar}</span>
-                        <span class="font-medium ${isCurrentPlayer ? 'text-blue-700 font-bold' : isCurrentDrawer ? 'text-green-700 font-bold' : ''}">
-                            ${isCurrentPlayer ? '👤 ' : ''}${isCurrentDrawer ? '🎨 ' : ''}${isLeader ? '👑 ' : ''}${player.username}${isCurrentPlayer ? ' (You)' : ''}${isCurrentDrawer ? ' (Drawing)' : ''}
-                        </span>
-                    </div>
-                    <div class="flex items-center gap-2">
-                        <span class="text-sm font-bold ${isCurrentPlayer ? 'text-blue-700' : isCurrentDrawer ? 'text-green-700' : ''}">${player.score}</span>
-                        ${canBan ? `<button class="ban-player-btn text-xs px-2 py-1 bg-red-500 text-white rounded hover:bg-red-600" data-player-id="${player.id}">🚫</button>` : ''}
-                    </div>
-                `;
-                this.playersListContainer.appendChild(playerDiv);
-            });
-            
-        // Update round options based on player count (for fair turns)
-        this.updateRoundOptions(playerArray.length);
-    }
-    
-    updateRoundOptions(playerCount) {
-        // Only update if we're the room creator and game hasn't started
-        if (!this.isCreator || !this.roundsSetting) return;
-        
-        // Store current value
-        const currentValue = parseInt(this.roundsSetting.value);
-        
-        // Clear existing options
-        this.roundsSetting.innerHTML = '';
-        
-        // Generate round options that are multiples of player count
-        // This ensures everyone gets an equal number of turns to draw
-        const minRounds = Math.max(playerCount, 2); // At least 2 rounds minimum
-        const maxRounds = playerCount * 5; // Up to 5 turns per player
-        
-        const options = [];
-        for (let multiplier = 1; multiplier <= 5; multiplier++) {
-            const rounds = playerCount * multiplier;
-            if (rounds >= minRounds && rounds <= 30) { // Cap at 30 rounds max
-                options.push(rounds);
-            }
-        }
-        
-        // Add options to dropdown
-        let selectedValue = options[1] || options[0]; // Default to 2x player count, or first available
-        
-        options.forEach(rounds => {
-            const option = document.createElement('option');
-            option.value = rounds;
-            option.textContent = `${rounds} (${Math.floor(rounds/playerCount)} per player)`;
-            
-            // Try to maintain the current selection if it's still valid
-            if (rounds === currentValue) {
-                selectedValue = rounds;
-            }
-            
-            this.roundsSetting.appendChild(option);
-        });
-        
-        // Set the selected value
-        this.roundsSetting.value = selectedValue;
-    }
-
-    updateRound(round) {
-        if (round) {
-            this.roundInfo.textContent = `Round ${round.roundNumber} of ${this.maxRounds}`;
-            this.updateTimer(round.timeLeft);
-        }
-    }
-
-    updateTimer(timeLeft) {
-        const minutes = Math.floor(timeLeft / 60000);
-        const seconds = Math.floor((timeLeft % 60000) / 1000);
-        this.timer.textContent = `${minutes}:${seconds.toString().padStart(2, '0')}`;
-    }
-
-    updateChat(messages) {
-        this.chatMessages.innerHTML = '';
-        messages.forEach(message => {
-            this.addChatMessage(message);
-        });
-    }
-
-    handlePlayerJoin(data) {
-        // Update players data and refresh list
-        if (this.playersData) {
-            this.playersData[data.player.id] = data.player;
-            this.updatePlayersList(this.playersData);
-        }
-        
-        this.addChatMessage({
-            username: 'System',
-            message: `👋 ${data.player.username} joined`,
-            timestamp: Date.now(),
-            isGuess: false
-        });
-        this.playSoundEffect('player-join');
-    }
-
-    handlePlayerLeave(data) {
-        // Remove player from stored data and refresh list
-        if (this.playersData && data.playerId) {
-            delete this.playersData[data.playerId];
-            this.updatePlayersList(this.playersData);
-        }
-        
-        let leaveMessage = `🚪 Player left the room`;
-        
-        // Handle ownership transfer
-        if (data.ownerTransferred && data.newOwnerId) {
-            const newOwnerName = this.playersData?.[data.newOwnerId]?.username || 'Unknown Player';
-            leaveMessage += `\n👑 ${newOwnerName} is now the room owner`;
-            
-            // Update UI if the current player became owner
-            if (data.newOwnerId === this.playerId) {
-                this.startGameBtn.classList.remove('hidden');
-                this.addChatMessage({
-                    username: 'System',
-                    message: '👑 You are now the room owner! You can start the game.',
-                    timestamp: Date.now(),
-                    isGuess: false
-                });
-            }
-        }
-        
-        this.addChatMessage({
-            username: 'System',
-            message: leaveMessage,
-            timestamp: Date.now(),
-            isGuess: false
-        });
-    }
-
-    handleDraw(strokeData) {
-        if (strokeData.clear) {
-            this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-            // Clear canvas states for other players too
-            this.canvasStates = [];
-            this.updateUndoButton();
-        } else if (strokeData.undo) {
-            // Handle undo from other players
-            if (this.canvasStates.length > 0) {
-                const previousState = this.canvasStates.pop();
-                this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-                this.ctx.putImageData(previousState, 0, 0);
-                this.updateUndoButton();
-            }
-        } else if (strokeData.fill) {
-            // Handle fill from other players
-            if (!this.isDrawer) {
-                this.saveCanvasState();
-            }
-            this.performFillForOtherPlayer(strokeData.x, strokeData.y, strokeData.color);
-        } else {
-            // Save state before applying received drawing data (for non-drawer players)
-            if (!this.isDrawer) {
-                this.saveCanvasState();
-            }
-            this.drawStrokeOnCanvas(strokeData);
-        }
-    }
-
-    handleGuess(message) {
-        this.addChatMessage(message);
-        
-        // Play sound effects for correct/wrong guesses
-        if (message.isCorrect) {
-            this.playSoundEffect('correct-guess');
-        } else if (message.playerId === this.playerId) {
-            // Only play wrong sound for own guesses to avoid spam
-            this.playSoundEffect('wrong-guess');
-        }
-        
-        // If this player guessed correctly, disable further guessing
-        if (message.isCorrect && message.playerId === this.playerId) {
-            this.chatInput.disabled = true;
-            this.chatInput.placeholder = 'You guessed correctly! Wait for next round...';
-        }
-    }
-
-    handleRoundStart(data) {
-        this.clearCanvas();
-        this.isDrawer = data.drawerId === this.playerId;
-        this.currentDrawerId = data.drawerId;
-        this.playSoundEffect('game-start');
-        
-        // Update max rounds if provided by server
-        if (data.maxRounds) {
-            this.maxRounds = data.maxRounds;
-        }
-        this.roundInfo.textContent = `Round ${data.roundNumber} of ${this.maxRounds}`;
-        this.updateTimer(data.timeLeft);
-        
-        // Update UI based on role
-        if (this.isDrawer) {
-            this.drawingTools.classList.remove('hidden');
-            this.gameStatus.textContent = '🎨 You are drawing! Wait for your word...';
-            this.canvas.classList.remove('disabled-canvas');
-            this.chatInput.disabled = true;
-            this.chatInput.placeholder = 'You cannot guess while drawing';
-            this.wordHint.classList.add('hidden');
-        } else {
-            this.drawingTools.classList.add('hidden');
-            this.wordDisplay.classList.add('hidden');
-            this.gameStatus.textContent = '🤔 Guess the drawing!';
-            this.canvas.classList.add('disabled-canvas');
-            this.chatInput.disabled = false;
-            this.chatInput.placeholder = 'Type your guess...';
-            
-            // Show word hint for guessers
-            if (data.wordHint) {
-                this.hintText.textContent = data.wordHint;
-                // Count letters by counting underscores (which represent letters)
-                const letterCount = data.wordHint.replace(/[^_]/g, '').length;
-                this.letterCount.textContent = `(${letterCount} letters)`;
-                this.wordHint.classList.remove('hidden');
-            }
-        }
-        
-        this.addChatMessage({
-            username: 'System',
-            message: `🎨 Round ${data.roundNumber} started!`,
-            timestamp: Date.now(),
-            isGuess: false
-        });
-        
-        // Update player list to highlight the current drawer
-        if (this.playersData) {
-            this.updatePlayersList(this.playersData);
-        }
-    }
-
-    handleDrawerWord(data) {
-        if (this.isDrawer) {
-            this.wordDisplay.classList.remove('hidden');
-            this.currentWord.textContent = data.word;
-            this.gameStatus.textContent = '🎨 You are drawing!';
-        }
-    }
-
-    handleTimerUpdate(data) {
-        this.updateTimer(data.timeLeft);
-        
-        // Show pause indicator if game is paused
-        if (data.isPaused) {
-            const timerElement = this.timer;
-            if (!timerElement.textContent.includes('⏸️')) {
-                timerElement.textContent += ' ⏸️';
-            }
-        }
-        
-        // Play ticking sound for final 10 seconds (but not when paused)
-        if (!data.isPaused) {
-            const secondsLeft = Math.floor(data.timeLeft / 1000);
-            if (secondsLeft <= 10 && secondsLeft > 0) {
-                this.playSoundEffect('timer-tick');
-            }
-        }
-    }
-
-
-    handleRoundEnd(data) {
-        const wordDisplay = data.revealed ? data.word : 'Hidden (you didn\'t guess correctly)';
-        this.addChatMessage({
-            username: 'System',
-            message: `⏰ Round ended! Word: ${wordDisplay}`,
-            timestamp: Date.now(),
-            isGuess: false
-        });
-        this.playSoundEffect('round-end');
-        
-        // Clear drawer highlighting when round ends
-        this.currentDrawerId = null;
-        
-        // Update scores with final data
-        if (data.scores) {
-            this.playersData = data.scores;
-            this.updatePlayersList(this.playersData);
-        }
-        
-        // Show score summary if there were any score updates
-        if (data.scoreUpdates && data.scoreUpdates.length > 0) {
-            this.addChatMessage({
-                username: 'System',
-                message: '🏆 Round Summary:',
-                timestamp: Date.now(),
-                isGuess: false
-            });
-            
-            // Group updates by unique players (in case someone guessed multiple times)
-            const playerUpdates = new Map();
-            let drawerUpdate = null;
-            
-            data.scoreUpdates.forEach(update => {
-                if (!playerUpdates.has(update.playerId)) {
-                    playerUpdates.set(update.playerId, {
-                        name: update.playerName,
-                        points: update.pointsEarned
-                    });
-                }
-                
-                if (update.drawerName && !drawerUpdate) {
-                    drawerUpdate = {
-                        name: update.drawerName,
-                        points: update.drawerPointsEarned
-                    };
-                }
-            });
-            
-            // Show player score updates
-            playerUpdates.forEach(update => {
-                this.addChatMessage({
-                    username: 'System',
-                    message: `  🎉 ${update.name}: +${update.points} points`,
-                    timestamp: Date.now(),
-                    isGuess: false
-                });
-            });
-            
-            // Show drawer score update
-            if (drawerUpdate) {
-                this.addChatMessage({
-                    username: 'System',
-                    message: `  🎨 ${drawerUpdate.name}: +${drawerUpdate.points} points (drawing)`,
-                    timestamp: Date.now(),
-                    isGuess: false
-                });
-            }
-        }
-    }
-
-    handleWordChoice(data) {
-        // Clear existing word choice buttons
-        const wordChoiceContainer = this.wordChoice.querySelector('.flex');
-        wordChoiceContainer.innerHTML = '';
-        
-        // Dynamically create buttons for each word choice
-        data.wordChoices.forEach((word, index) => {
-            const button = document.createElement('button');
-            button.id = `word-choice-${index + 1}`;
-            button.className = 'px-4 py-2 fun-button rounded-lg';
-            button.textContent = word;
-            button.onclick = () => this.chooseWord(word);
-            wordChoiceContainer.appendChild(button);
-        });
-        
-        this.wordChoice.classList.remove('hidden');
-        this.gameStatus.textContent = '📝 Choose your word to draw!';
-        
-        // Start choice timer
-        let timeLeft = 20;
-        this.choiceTimerInterval = setInterval(() => {
-            timeLeft--;
-            this.choiceTimer.textContent = `${timeLeft} seconds to choose`;
-            if (timeLeft <= 0) {
-                clearInterval(this.choiceTimerInterval);
-                this.choiceTimerInterval = null;
-                // Auto-choose first word if time runs out
-                this.chooseWord(data.wordChoices[0]);
-            }
-        }, 1000);
-    }
-
-    handleRoundPrepare(data) {
-        // Update max rounds if provided by server
-        if (data.maxRounds) {
-            this.maxRounds = data.maxRounds;
-        }
-        this.roundInfo.textContent = `Round ${data.roundNumber} of ${this.maxRounds}`;
-        if (data.drawerId === this.playerId) {
-            this.gameStatus.textContent = '🎨 You are the drawer! Waiting for word choice...';
-        } else {
-            this.gameStatus.textContent = '⏳ Waiting for drawer to choose word...';
-        }
-    }
-
-    chooseWord(word) {
-        // Clear the choice timer if it's running
-        if (this.choiceTimerInterval) {
-            clearInterval(this.choiceTimerInterval);
-            this.choiceTimerInterval = null;
-        }
-        
-        this.wordChoice.classList.add('hidden');
-        
-        if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-            this.socket.send(JSON.stringify({
-                type: 'word-choice',
-                data: word,
-                timestamp: Date.now()
-            }));
-        }
-    }
-
-    drawStroke(x1, y1, x2, y2, isNewStroke) {
-        const strokeData = {
-            prevX: x1,
-            prevY: y1,
-            x: x2,
-            y: y2,
-            color: this.colorPicker.value,
-            width: parseInt(this.brushSize.value),
-            isNewStroke
-        };
-
-        this.drawStrokeOnCanvas(strokeData);
-        
-        if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-            this.socket.send(JSON.stringify({
-                type: 'draw',
-                data: strokeData,
-                timestamp: Date.now()
-            }));
-        }
-    }
-
-    drawStrokeOnCanvas(strokeData) {
-        this.ctx.strokeStyle = strokeData.color;
-        this.ctx.lineWidth = strokeData.width;
-        this.ctx.lineCap = 'round';
-        this.ctx.lineJoin = 'round';
-
-        this.ctx.beginPath();
-        if (strokeData.prevX !== undefined && strokeData.prevY !== undefined) {
-            this.ctx.moveTo(strokeData.prevX, strokeData.prevY);
-            this.ctx.lineTo(strokeData.x, strokeData.y);
-        } else {
-            this.ctx.arc(strokeData.x, strokeData.y, strokeData.width / 2, 0, Math.PI * 2);
-        }
-        this.ctx.stroke();
-    }
-
-    sendMessage() {
-        const message = this.chatInput.value.trim();
-        if (!message || this.isDrawer) return;
-
-        if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-            this.socket.send(JSON.stringify({
-                type: 'guess',
-                data: message,
-                timestamp: Date.now()
-            }));
-        }
-
-        this.chatInput.value = '';
-    }
-
-    addChatMessage(message) {
-        const messageDiv = document.createElement('div');
-        messageDiv.className = `chat-bubble text-sm ${
-            message.isCorrect ? 'bg-green-500' : 
-            message.username === 'System' ? 'bg-gray-500' : ''
-        }`;
-        
-        const time = new Date(message.timestamp).toLocaleTimeString('en-US', { 
-            hour12: false, 
-            hour: '2-digit', 
-            minute: '2-digit' 
-        });
-        
-        messageDiv.innerHTML = `
-            <span class="opacity-75 text-xs">[${time}]</span>
-            <span class="font-medium">${message.username}:</span>
-            ${message.isCorrect ? '✅ ' : ''}${message.message}
-        `;
-        
-        this.chatMessages.appendChild(messageDiv);
-        this.chatMessages.scrollTop = this.chatMessages.scrollHeight;
-    }
-
-    clearCanvas() {
-        this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-        
-        // Only send clear command if we're the drawer
-        if (this.isDrawer && this.socket && this.socket.readyState === WebSocket.OPEN) {
-            this.socket.send(JSON.stringify({
-                type: 'draw',
-                data: { clear: true },
-                timestamp: Date.now()
-            }));
-        }
-    }
-
-    async loadLobbyBackgroundImage() {
-        // Use a beautiful gradient background with geometric patterns instead of external images
-        // This avoids CORS issues and ensures consistent loading
-        this.createLobbyBackground();
-    }
-
-    createLobbyBackground() {
-        try {
-            // Clear canvas first
-            this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-            
-            // Create multiple gradient backgrounds to choose from
-            const gradients = [
-                // Purple to blue
-                ['#667eea', '#764ba2'],
-                // Orange to pink  
-                ['#f093fb', '#f5576c'],
-                // Green to teal
-                ['#4facfe', '#00f2fe'],
-                // Sunset colors
-                ['#fa709a', '#fee140'],
-                // Ocean colors
-                ['#a8edea', '#fed6e3'],
-                // Northern lights
-                ['#d299c2', '#fef9d7'],
-                // Fire colors
-                ['#fdbb2d', '#22c1c3'],
-                // Space colors
-                ['#2196f3', '#21cbf3']
-            ];
-            
-            const randomGradient = gradients[Math.floor(Math.random() * gradients.length)];
-            
-            // Create radial gradient for more visual interest
-            const gradient = this.ctx.createRadialGradient(
-                this.canvas.width / 2, this.canvas.height / 2, 0,
-                this.canvas.width / 2, this.canvas.height / 2, Math.max(this.canvas.width, this.canvas.height) / 2
-            );
-            gradient.addColorStop(0, randomGradient[0]);
-            gradient.addColorStop(1, randomGradient[1]);
-            
-            this.ctx.fillStyle = gradient;
-            this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
-            
-            // Add some geometric shapes for visual interest
-            this.addGeometricPatterns();
-            
-            // Add overlay and text
-            this.ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
-            this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
-            
-            this.ctx.fillStyle = 'white';
-            this.ctx.font = 'bold 28px Inter, system-ui, sans-serif';
-            this.ctx.textAlign = 'center';
-            this.ctx.shadowColor = 'rgba(0, 0, 0, 0.5)';
-            this.ctx.shadowBlur = 4;
-            this.ctx.shadowOffsetX = 2;
-            this.ctx.shadowOffsetY = 2;
-            
-            this.ctx.fillText('Waiting for game to start...', this.canvas.width / 2, this.canvas.height / 2 - 20);
-            
-            this.ctx.font = '18px Inter, system-ui, sans-serif';
-            this.ctx.fillText('🎨 Get ready to draw and guess!', this.canvas.width / 2, this.canvas.height / 2 + 20);
-            
-            // Reset shadow
-            this.ctx.shadowColor = 'transparent';
-            this.ctx.shadowBlur = 0;
-            this.ctx.shadowOffsetX = 0;
-            this.ctx.shadowOffsetY = 0;
-            
-        } catch (error) {
-            console.warn('Failed to create lobby background:', error);
-            this.showLobbyText();
-        }
-    }
-
-    addGeometricPatterns() {
-        const patterns = [
-            () => this.drawCirclePattern(),
-            () => this.drawTrianglePattern(),
-            () => this.drawHexagonPattern(),
-            () => this.drawWavePattern()
-        ];
-        
-        // Randomly choose a pattern
-        const randomPattern = patterns[Math.floor(Math.random() * patterns.length)];
-        randomPattern();
-    }
-
-    drawCirclePattern() {
-        this.ctx.fillStyle = 'rgba(255, 255, 255, 0.1)';
-        for (let i = 0; i < 8; i++) {
-            const x = Math.random() * this.canvas.width;
-            const y = Math.random() * this.canvas.height;
-            const radius = 20 + Math.random() * 60;
-            this.ctx.beginPath();
-            this.ctx.arc(x, y, radius, 0, Math.PI * 2);
-            this.ctx.fill();
-        }
-    }
-
-    drawTrianglePattern() {
-        this.ctx.fillStyle = 'rgba(255, 255, 255, 0.08)';
-        for (let i = 0; i < 6; i++) {
-            const x = Math.random() * this.canvas.width;
-            const y = Math.random() * this.canvas.height;
-            const size = 30 + Math.random() * 50;
-            
-            this.ctx.beginPath();
-            this.ctx.moveTo(x, y - size/2);
-            this.ctx.lineTo(x - size/2, y + size/2);
-            this.ctx.lineTo(x + size/2, y + size/2);
-            this.ctx.closePath();
-            this.ctx.fill();
-        }
-    }
-
-    drawHexagonPattern() {
-        this.ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
-        this.ctx.lineWidth = 2;
-        for (let i = 0; i < 4; i++) {
-            const x = Math.random() * this.canvas.width;
-            const y = Math.random() * this.canvas.height;
-            const size = 25 + Math.random() * 40;
-            
-            this.ctx.beginPath();
-            for (let j = 0; j < 6; j++) {
-                const angle = (j * Math.PI) / 3;
-                const px = x + size * Math.cos(angle);
-                const py = y + size * Math.sin(angle);
-                if (j === 0) {
-                    this.ctx.moveTo(px, py);
-                } else {
-                    this.ctx.lineTo(px, py);
-                }
-            }
-            this.ctx.closePath();
-            this.ctx.stroke();
-        }
-    }
-
-    drawWavePattern() {
-        this.ctx.strokeStyle = 'rgba(255, 255, 255, 0.12)';
-        this.ctx.lineWidth = 3;
-        
-        for (let i = 0; i < 3; i++) {
-            const startY = (this.canvas.height / 4) * (i + 1);
-            const amplitude = 20 + Math.random() * 30;
-            const frequency = 0.01 + Math.random() * 0.02;
-            const phase = Math.random() * Math.PI * 2;
-            
-            this.ctx.beginPath();
-            for (let x = 0; x <= this.canvas.width; x += 5) {
-                const y = startY + amplitude * Math.sin(frequency * x + phase);
-                if (x === 0) {
-                    this.ctx.moveTo(x, y);
-                } else {
-                    this.ctx.lineTo(x, y);
-                }
-            }
-            this.ctx.stroke();
-        }
-    }
-
-    showLobbyText() {
-        // Fallback lobby display with gradient background
-        const gradient = this.ctx.createLinearGradient(0, 0, this.canvas.width, this.canvas.height);
-        gradient.addColorStop(0, '#667eea');
-        gradient.addColorStop(1, '#764ba2');
-        
-        this.ctx.fillStyle = gradient;
-        this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
-        
-        this.ctx.fillStyle = 'white';
-        this.ctx.font = 'bold 24px Inter, system-ui, sans-serif';
-        this.ctx.textAlign = 'center';
-        this.ctx.fillText('Waiting for game to start...', this.canvas.width / 2, this.canvas.height / 2);
-        
-        this.ctx.font = '16px Inter, system-ui, sans-serif';
-        this.ctx.fillText('🎨 Get ready to draw and guess!', this.canvas.width / 2, this.canvas.height / 2 + 40);
-    }
-
-    saveCanvasState() {
-        const imageData = this.ctx.getImageData(0, 0, this.canvas.width, this.canvas.height);
-        this.canvasStates.push(imageData);
-        
-        // Limit the number of saved states
-        if (this.canvasStates.length > this.maxUndoStates) {
-            this.canvasStates.shift();
-        }
-        
-        this.updateUndoButton();
-    }
-
-    undoCanvas() {
-        if (this.canvasStates.length === 0) return;
-        
-        const previousState = this.canvasStates.pop();
-        this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-        this.ctx.putImageData(previousState, 0, 0);
-        
-        this.updateUndoButton();
-        
-        // Send undo command to other players if we're the drawer
-        if (this.isDrawer && this.socket && this.socket.readyState === WebSocket.OPEN) {
-            this.socket.send(JSON.stringify({
-                type: 'draw',
-                data: { undo: true },
-                timestamp: Date.now()
-            }));
-        }
-    }
-
-    updateUndoButton() {
-        this.undoCanvasBtn.disabled = this.canvasStates.length === 0;
-    }
-
-    toggleFillTool() {
-        this.fillMode = !this.fillMode;
-        
-        // Update button appearance
-        if (this.fillMode) {
-            this.fillToolBtn.classList.add('bg-green-700', 'ring-2', 'ring-green-300');
-            this.fillToolBtn.classList.remove('bg-green-500');
-            this.canvas.style.cursor = 'url(data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjAiIGhlaWdodD0iMjAiIHZpZXdCb3g9IjAgMCAyMCAyMCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTEwIDJMMTggMTBIMTRMMTAgNlY2TDYgMTBIMkwxMCAyWiIgZmlsbD0iYmxhY2siLz4KPHBhdGggZD0iTTIgMTRIMThWMThIMlYxNFoiIGZpbGw9ImJsYWNrIi8+Cjwvc3ZnPgo=) 10 18, auto';
-        } else {
-            this.fillToolBtn.classList.remove('bg-green-700', 'ring-2', 'ring-green-300');
-            this.fillToolBtn.classList.add('bg-green-500');
-            this.canvas.style.cursor = this.isDrawer ? 'crosshair' : 'not-allowed';
-        }
-    }
-
-    selectColor(color) {
-        // Update the hidden input value
-        this.colorPicker.value = color;
-        
-        // Update visual selection - remove border from all swatches
-        document.querySelectorAll('.color-swatch').forEach(swatch => {
-            swatch.classList.remove('border-gray-800');
-            swatch.classList.add('border-transparent');
-        });
-        
-        // Add border to selected swatch
-        const selectedSwatch = document.querySelector(`[data-color="${color}"]`);
-        if (selectedSwatch) {
-            selectedSwatch.classList.remove('border-transparent');
-            selectedSwatch.classList.add('border-gray-800');
-        }
-    }
-
-    floodFill(startX, startY) {
-        const imageData = this.ctx.getImageData(0, 0, this.canvas.width, this.canvas.height);
-        const data = imageData.data;
-        
-        // Convert fill color to RGBA
-        const fillColor = this.hexToRgba(this.colorPicker.value);
-        
-        // Get the color at the starting point
-        const startIndex = (startY * this.canvas.width + startX) * 4;
-        const startColor = {
-            r: data[startIndex],
-            g: data[startIndex + 1],
-            b: data[startIndex + 2],
-            a: data[startIndex + 3]
-        };
-        
-        // If the starting color is the same as fill color, do nothing
-        if (this.colorsMatch(startColor, fillColor)) return;
-        
-        // Perform flood fill using stack-based algorithm
-        const stack = [{x: startX, y: startY}];
-        const visited = new Set();
-        
-        while (stack.length > 0) {
-            const {x, y} = stack.pop();
-            const key = `${x},${y}`;
-            
-            if (visited.has(key) || x < 0 || x >= this.canvas.width || y < 0 || y >= this.canvas.height) {
-                continue;
-            }
-            
-            const index = (y * this.canvas.width + x) * 4;
-            const currentColor = {
-                r: data[index],
-                g: data[index + 1],
-                b: data[index + 2],
-                a: data[index + 3]
-            };
-            
-            if (!this.colorsMatch(currentColor, startColor)) {
-                continue;
-            }
-            
-            visited.add(key);
-            
-            // Set the new color
-            data[index] = fillColor.r;
-            data[index + 1] = fillColor.g;
-            data[index + 2] = fillColor.b;
-            data[index + 3] = 255; // Full alpha
-            
-            // Add neighboring pixels
-            stack.push({x: x + 1, y});
-            stack.push({x: x - 1, y});
-            stack.push({x, y: y + 1});
-            stack.push({x, y: y - 1});
-        }
-        
-        // Apply the changes
-        this.ctx.putImageData(imageData, 0, 0);
-        
-        // Send fill data to other players
-        if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-            this.socket.send(JSON.stringify({
-                type: 'draw',
-                data: { 
-                    fill: true, 
-                    x: startX, 
-                    y: startY, 
-                    color: this.colorPicker.value 
-                },
-                timestamp: Date.now()
-            }));
-        }
-    }
-
-    hexToRgba(hex) {
-        const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
-        return result ? {
-            r: parseInt(result[1], 16),
-            g: parseInt(result[2], 16),
-            b: parseInt(result[3], 16),
-            a: 255
-        } : {r: 0, g: 0, b: 0, a: 255};
-    }
-
-    colorsMatch(color1, color2) {
-        return color1.r === color2.r && color1.g === color2.g && 
-               color1.b === color2.b && color1.a === color2.a;
-    }
-
-    performFillForOtherPlayer(x, y, color) {
-        // Similar to floodFill but using received color and coordinates
-        const imageData = this.ctx.getImageData(0, 0, this.canvas.width, this.canvas.height);
-        const data = imageData.data;
-        
-        const fillColor = this.hexToRgba(color);
-        const startIndex = (y * this.canvas.width + x) * 4;
-        const startColor = {
-            r: data[startIndex],
-            g: data[startIndex + 1],
-            b: data[startIndex + 2],
-            a: data[startIndex + 3]
-        };
-        
-        if (this.colorsMatch(startColor, fillColor)) return;
-        
-        const stack = [{x, y}];
-        const visited = new Set();
-        
-        while (stack.length > 0) {
-            const {x: currX, y: currY} = stack.pop();
-            const key = `${currX},${currY}`;
-            
-            if (visited.has(key) || currX < 0 || currX >= this.canvas.width || currY < 0 || currY >= this.canvas.height) {
-                continue;
-            }
-            
-            const index = (currY * this.canvas.width + currX) * 4;
-            const currentColor = {
-                r: data[index],
-                g: data[index + 1],
-                b: data[index + 2],
-                a: data[index + 3]
-            };
-            
-            if (!this.colorsMatch(currentColor, startColor)) {
-                continue;
-            }
-            
-            visited.add(key);
-            
-            data[index] = fillColor.r;
-            data[index + 1] = fillColor.g;
-            data[index + 2] = fillColor.b;
-            data[index + 3] = 255;
-            
-            stack.push({x: currX + 1, y: currY});
-            stack.push({x: currX - 1, y: currY});
-            stack.push({x: currX, y: currY + 1});
-            stack.push({x: currX, y: currY - 1});
-        }
-        
-        this.ctx.putImageData(imageData, 0, 0);
-    }
-
-    openWordListModal() {
-        this.wordListModal.classList.remove('hidden');
-        // Load current custom words if any
-        if (this.customWords) {
-            this.customWordsTextarea.value = this.customWords.join('\n');
-        }
-    }
-
-    closeWordListModal() {
-        this.wordListModal.classList.add('hidden');
-    }
-
-    saveCustomWords() {
-        const wordsText = this.customWordsTextarea.value.trim();
-        if (wordsText) {
-            // Split by commas or newlines and clean up
-            this.customWords = wordsText
-                .split(/[,\n]/)
-                .map(word => word.trim())
-                .filter(word => word.length > 0 && word.length <= 20);
-            
-            if (this.customWords.length < 10) {
-                alert('Please provide at least 10 words for a good game experience.');
-                return;
-            }
-        } else {
-            this.customWords = null; // Use default words
-        }
-        
-        this.closeWordListModal();
-        
-        // Show confirmation
-        const wordCount = this.customWords ? this.customWords.length : 'default';
-        const message = this.customWords 
-            ? `✅ Custom word list saved (${wordCount} words)` 
-            : '✅ Using default word list';
-        
-        // Temporarily show in game status
-        const originalStatus = this.gameStatus.textContent;
-        this.gameStatus.textContent = message;
-        setTimeout(() => {
-            this.gameStatus.textContent = originalStatus;
-        }, 3000);
-    }
-
-    async togglePauseGame() {
-        if (!this.isCreator || !this.playerId || !this.roomId) {
-            return;
-        }
-
-        try {
-            const response = await fetch(`/rooms/${this.roomId}/pause`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ playerId: this.playerId })
-            });
-
-            const data = await response.json();
-            if (!response.ok) {
-                alert(data.error || 'Failed to pause/resume game');
-            }
-            // The server will broadcast the pause state change to all players
-        } catch (error) {
-            console.error('Error toggling pause:', error);
-            alert('Failed to pause/resume game');
-        }
-    }
-
-    handleGamePause(data) {
-        const isPaused = data.isPaused;
-        
-        if (isPaused) {
-            // Game is paused
-            if (this.isCreator) {
-                this.pauseGameBtn.innerHTML = '▶️ Resume';
-                this.pauseGameBtn.classList.remove('bg-orange-500', 'hover:bg-orange-600');
-                this.pauseGameBtn.classList.add('bg-green-500', 'hover:bg-green-600');
-            }
-            this.gameStatus.textContent = '⏸️ Game paused by room creator';
-            
-            // Disable interactions for all players
-            this.canvas.classList.add('disabled-canvas');
-            this.drawingTools.classList.add('hidden');
-            this.chatInput.disabled = true;
-            this.chatInput.placeholder = 'Game is paused...';
-        } else {
-            // Game is resumed
-            if (this.isCreator) {
-                this.pauseGameBtn.innerHTML = '⏸️ Pause';
-                this.pauseGameBtn.classList.remove('bg-green-500', 'hover:bg-green-600');
-                this.pauseGameBtn.classList.add('bg-orange-500', 'hover:bg-orange-600');
-            }
-            
-            // Re-enable interactions based on player role
-            if (this.isDrawer) {
-                this.canvas.classList.remove('disabled-canvas');
-                this.drawingTools.classList.remove('hidden');
-                this.gameStatus.textContent = '🎨 You are drawing!';
-                this.chatInput.disabled = true;
-                this.chatInput.placeholder = 'You cannot guess while drawing';
-            } else {
-                this.gameStatus.textContent = '🤔 Guess the drawing!';
-                this.chatInput.disabled = false;
-                this.chatInput.placeholder = 'Type your guess...';
-            }
-        }
-        
-        this.addChatMessage({
-            username: 'System',
-            message: isPaused ? '⏸️ Game paused' : '▶️ Game resumed',
-            timestamp: Date.now(),
-            isGuess: false
-        });
-    }
-
-    handlePlayerBanned(data) {
-        // Remove banned player from stored data
-        if (this.playersData && data.bannedPlayerId) {
-            delete this.playersData[data.bannedPlayerId];
-            this.updatePlayersList(this.playersData);
-        }
-        
-        this.addChatMessage({
-            username: 'System',
-            message: `🚫 ${data.bannedPlayerName} has been banned from the room`,
-            timestamp: Date.now(),
-            isGuess: false
-        });
-    }
-
-    async banPlayer(targetPlayerId) {
-        if (!this.isCreator) return;
-        
-        const targetPlayer = this.playersData?.[targetPlayerId];
-        if (!targetPlayer) return;
-        
-        if (!confirm(`Are you sure you want to ban ${targetPlayer.username}?`)) {
-            return;
-        }
-        
-        try {
-            const response = await fetch(`/rooms/${this.roomId}/ban`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ 
-                    requesterId: this.playerId,
-                    targetPlayerId: targetPlayerId
-                })
-            });
-            
-            if (!response.ok) {
-                const error = await response.json();
-                alert(`Failed to ban player: ${error.error}`);
-            }
-        } catch (error) {
-            console.error('Error banning player:', error);
-            alert('Failed to ban player');
-        }
-    }
-
-    async leaveRoom() {
-        // Clean up timers
-        if (this.choiceTimerInterval) {
-            clearInterval(this.choiceTimerInterval);
-            this.choiceTimerInterval = null;
-        }
-        
-        // Close WebSocket connection
-        if (this.socket) {
-            this.socket.close();
-            this.socket = null;
-        }
-
-        // Notify server we're leaving
-        if (this.roomId && this.playerId) {
-            try {
-                await fetch(`/rooms/${this.roomId}/leave`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ playerId: this.playerId })
-                });
-            } catch (error) {
-                console.error('Error leaving room:', error);
-            }
-        }
-
-        // Reset game state
-        this.playerId = null;
-        this.roomId = null;
-        this.isDrawer = false;
-        this.isDrawing = false;
-        this.customWords = null;
-
-        this.showHomeScreen();
-    }
-
-    handleGameEnd(data) {
-        let statusMessage = `🎉 Game Over! Winner: ${data.winner.username}`;
-        let chatMessage = `🎉 Game finished! 🥇 Winner: ${data.winner.username}`;
-        
-        // Handle different end reasons
-        if (data.reason === 'Only one player remaining') {
-            statusMessage = `🚪 Game ended - only one player remaining`;
-            chatMessage = `🚪 Game ended because only one player remained. ${data.winner.username} wins by default!`;
-            
-            // For single player remaining, return to homepage after a brief delay
-            this.gameStatus.textContent = statusMessage;
-            this.addChatMessage({
-                username: 'System',
-                message: chatMessage,
-                timestamp: Date.now()
-            });
-            
-            setTimeout(() => {
-                this.showHomeScreen();
-            }, 3000); // Return to homepage after 3 seconds
-            return;
-        }
-        
-        this.gameStatus.textContent = statusMessage;
-        
-        // Add game end message to chat
-        this.addChatMessage({
-            username: 'System',
-            message: chatMessage,
-            timestamp: Date.now()
-        });
-
-        // Show winner celebration modal for normal game end
-        setTimeout(() => {
-            this.showWinnerModal(data.finalScores);
-        }, 1000);
-    }
-
-    showGameScreen() {
-        this.homeScreen.classList.add('hidden');
-        this.gameScreen.classList.remove('hidden');
-        this.stopStatsRefreshTimer(); // Stop refreshing stats when in game
-    }
-
-    showHomeScreen() {
-        this.gameScreen.classList.add('hidden');
-        this.homeScreen.classList.remove('hidden');
-        this.roomInput.value = '';
-        this.playerId = null;
-        this.roomId = null;
-        this.isDrawer = false;
-        this.currentDrawerId = null;
-        
-        // Update URL back to homepage
-        this.updateUrl(null);
-        
-        this.startStatsRefreshTimer(); // Resume refreshing stats when back on homepage
-        this.updateHomePageStats(); // Immediate update when returning to homepage
-    }
-
-    async startGame() {
-        if (!this.isCreator || !this.playerId || !this.roomId) {
-            return;
-        }
-
-        try {
-            const gameSettings = {
-                playerId: this.playerId,
-                maxRounds: parseInt(this.roundsSetting.value),
-                roundDuration: parseInt(this.durationSetting.value),
-                wordChoiceCount: parseInt(this.wordChoicesSetting.value),
-                customWords: this.customWords || null
-            };
-
-            const response = await fetch(`/rooms/${this.roomId}/start`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(gameSettings)
-            });
-
-            const data = await response.json();
-            if (response.ok) {
-                this.startGameBtn.classList.add('hidden');
-                this.gameSettings.classList.add('hidden');
-                // Show pause button for room creator
-                if (this.isCreator) {
-                    this.pauseGameBtn.classList.remove('hidden');
-                }
-                this.gameStatus.textContent = '🚀 Game starting...';
-            } else {
-                alert(data.error || 'Failed to start game');
-            }
-        } catch (error) {
-            console.error('Error starting game:', error);
-            alert('Failed to start game');
-        }
-    }
-
-    async showWinnerModal(finalScores) {
-        // Get random celebration GIF
-        const celebrationGif = await this.getRandomCelebrationGif();
-        this.celebrationGif.src = celebrationGif;
-        
-        // Populate podium with top 3 players
-        const topPlayers = finalScores.slice(0, 3);
-        
-        // First place (always exists)
-        if (topPlayers[0]) {
-            this.firstPlacePlayer.textContent = topPlayers[0].username;
-            this.firstPlaceScore.textContent = `${topPlayers[0].score} pts`;
-        }
-        
-        // Second place (might not exist)
-        if (topPlayers[1]) {
-            this.secondPlacePlayer.textContent = topPlayers[1].username;
-            this.secondPlaceScore.textContent = `${topPlayers[1].score} pts`;
-            this.secondPlacePlayer.parentElement.style.display = 'block';
-        } else {
-            this.secondPlacePlayer.parentElement.style.display = 'none';
-        }
-        
-        // Third place (might not exist)
-        if (topPlayers[2]) {
-            this.thirdPlacePlayer.textContent = topPlayers[2].username;
-            this.thirdPlaceScore.textContent = `${topPlayers[2].score} pts`;
-            this.thirdPlacePlayer.parentElement.style.display = 'block';
-        } else {
-            this.thirdPlacePlayer.parentElement.style.display = 'none';
-        }
-        
-        // Show the modal
-        this.winnerModal.classList.remove('hidden');
-    }
-
-    closeWinnerModal() {
-        this.winnerModal.classList.add('hidden');
-    }
-
-    async getRandomCelebrationGif() {
-        const celebrationGifs = [
-            'https://media.giphy.com/media/26u4cqiYI30juCOGY/giphy.gif',
-            'https://media.giphy.com/media/3oz8xAFtqoOUUrsh7W/giphy.gif',
-            'https://media.giphy.com/media/26u4kr0pRWGkXaDa0/giphy.gif',
-            'https://media.giphy.com/media/l0MYt5jPR6QX5pnqM/giphy.gif',
-            'https://media.giphy.com/media/26tOZ42Mg6pbTUPHW/giphy.gif',
-            'https://media.giphy.com/media/3o6fJ1BM7R2EBRDnxK/giphy.gif',
-            'https://media.giphy.com/media/3oKIPf3C7HqqYBVcCk/giphy.gif',
-            'https://media.giphy.com/media/l0HlJUmLPPX99gtuo/giphy.gif',
-            'https://media.giphy.com/media/26uf759LlDftqZNVm/giphy.gif',
-            'https://media.giphy.com/media/3o7abKhOpu0NwenH3O/giphy.gif'
-        ];
-        
-        const randomIndex = Math.floor(Math.random() * celebrationGifs.length);
-        return celebrationGifs[randomIndex];
-    }
+'use strict';
+
+// ---------------------------------------------------------------------------
+// Small helpers
+
+const $ = (id) => document.getElementById(id);
+
+/** Create an element. Text is always set with textContent, never innerHTML. */
+function h(tag, props = {}, ...children) {
+	const node = document.createElement(tag);
+	for (const [key, value] of Object.entries(props)) {
+		if (value == null || value === false) continue;
+		if (key === 'class') node.className = value;
+		else if (key === 'text') node.textContent = value;
+		else if (key.startsWith('on')) node.addEventListener(key.slice(2), value);
+		else if (key === 'dataset') Object.assign(node.dataset, value);
+		else node.setAttribute(key, value === true ? '' : value);
+	}
+	for (const child of children.flat()) {
+		if (child != null && child !== false) node.append(child instanceof Node ? child : String(child));
+	}
+	return node;
 }
 
-// Initialize the game when the page loads
+const show = (node, visible = true) => node.classList.toggle('hidden', !visible);
+const store = {
+	get: (k) => {
+		try {
+			return localStorage.getItem(k);
+		} catch {
+			return null;
+		}
+	},
+	set: (k, v) => {
+		try {
+			localStorage.setItem(k, v);
+		} catch {}
+	},
+};
+const session = {
+	key: (roomId) => `wutizzit:session:${roomId}`,
+	get(roomId) {
+		try {
+			return sessionStorage.getItem(this.key(roomId));
+		} catch {
+			return null;
+		}
+	},
+	set(roomId, token) {
+		try {
+			sessionStorage.setItem(this.key(roomId), token);
+		} catch {}
+	},
+	clear(roomId) {
+		try {
+			sessionStorage.removeItem(this.key(roomId));
+		} catch {}
+	},
+};
+
+const CLOSE = { invalidSession: 4001, replaced: 4002, kicked: 4003, roomClosed: 4004, left: 4005 };
+const CANVAS_W = 800;
+const CANVAS_H = 500;
+const COLORS = ['#000000', '#ffffff', '#808080', '#ff0000', '#ffa500', '#ffff00', '#00c000', '#00ffff', '#0000ff', '#800080', '#ffc0cb', '#a0522d'];
+const AVATARS = ['🐱', '🐶', '🐭', '🐹', '🐰', '🦊', '🐻', '🐼', '🐨', '🐯', '🦁', '🐮', '🐷', '🐸', '🐵', '🐔', '🐧', '🐦', '🐤', '🦆', '🦋', '🐛', '🐝', '🐞', '🦄', '🐲', '👽', '🤖', '🎭', '🎪'];
+const CELEBRATION_GIFS = [
+	'https://media.giphy.com/media/26u4cqiYI30juCOGY/giphy.gif',
+	'https://media.giphy.com/media/3oz8xAFtqoOUUrsh7W/giphy.gif',
+	'https://media.giphy.com/media/26u4kr0pRWGkXaDa0/giphy.gif',
+	'https://media.giphy.com/media/l0MYt5jPR6QX5pnqM/giphy.gif',
+	'https://media.giphy.com/media/26tOZ42Mg6pbTUPHW/giphy.gif',
+	'https://media.giphy.com/media/3o6fJ1BM7R2EBRDnxK/giphy.gif',
+];
+
+function avatarFor(id) {
+	let hash = 0;
+	for (let i = 0; i < id.length; i++) hash = (Math.imul(hash, 31) + id.charCodeAt(i)) | 0;
+	return AVATARS[Math.abs(hash) % AVATARS.length];
+}
+
+function randomName() {
+	const adjectives = ['Sneaky', 'Mighty', 'Cosmic', 'Wobbly', 'Dizzy', 'Bouncy', 'Funky', 'Quirky', 'Wacky', 'Sparkly', 'Fluffy', 'Sassy', 'Cheeky', 'Grumpy', 'Sleepy', 'Zesty', 'Fizzy', 'Crispy', 'Squishy', 'Jiggly', 'Loopy', 'Goofy', 'Turbo', 'Spicy', 'Soggy', 'Noodly', 'Snazzy', 'Toasty'];
+	const nouns = ['Einstein', 'Cleopatra', 'Napoleon', 'Gandalf', 'Yoda', 'Sherlock', 'Pikachu', 'Mario', 'Kirby', 'Shrek', 'Garfield', 'Snoopy', 'Kermit', 'Elmo', 'Scooby', 'Grinch', 'Waffle', 'Pickle', 'Noodle', 'Potato', 'Llama', 'Sloth', 'Penguin', 'Narwhal', 'Burrito', 'Pretzel', 'Dumpling', 'Walrus'];
+	const pick = (a) => a[Math.floor(Math.random() * a.length)];
+	return `${pick(adjectives)}${pick(nouns)}`;
+}
+
+function formatTime(ms) {
+	const total = Math.max(0, Math.ceil(ms / 1000));
+	return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
+}
+
+// ---------------------------------------------------------------------------
+// Sound: tiny synth, created lazily after a user gesture (autoplay policy).
+
+class Sound {
+	constructor(button) {
+		this.ctx = null;
+		this.button = button;
+		this.muted = store.get('wutizzit:muted') === '1';
+		this.render();
+		button.addEventListener('click', () => {
+			this.muted = !this.muted;
+			store.set('wutizzit:muted', this.muted ? '1' : '0');
+			this.render();
+		});
+		const unlock = () => {
+			try {
+				this.ctx ??= new (window.AudioContext || window.webkitAudioContext)();
+				if (this.ctx.state === 'suspended') this.ctx.resume();
+			} catch {}
+		};
+		window.addEventListener('pointerdown', unlock, { passive: true });
+		window.addEventListener('keydown', unlock);
+	}
+
+	render() {
+		this.button.textContent = this.muted ? '🔇' : '🔊';
+		this.button.setAttribute('aria-pressed', String(this.muted));
+		this.button.setAttribute('aria-label', this.muted ? 'Unmute sounds' : 'Mute sounds');
+	}
+
+	tone(freq, ms = 200, delay = 0, type = 'sine') {
+		if (this.muted || !this.ctx || this.ctx.state !== 'running') return;
+		const t = this.ctx.currentTime + delay / 1000;
+		const osc = this.ctx.createOscillator();
+		const gain = this.ctx.createGain();
+		osc.type = type;
+		osc.frequency.setValueAtTime(freq, t);
+		gain.gain.setValueAtTime(0.1, t);
+		gain.gain.exponentialRampToValueAtTime(0.001, t + ms / 1000);
+		osc.connect(gain).connect(this.ctx.destination);
+		osc.start(t);
+		osc.stop(t + ms / 1000);
+	}
+
+	play(name) {
+		switch (name) {
+			case 'correct':
+				return this.tone(523, 250), this.tone(659, 250, 100), this.tone(784, 350, 200);
+			case 'other-correct':
+				return this.tone(660, 150), this.tone(880, 200, 90);
+			case 'wrong':
+				return this.tone(200, 120, 0, 'square');
+			case 'close':
+				return this.tone(440, 120), this.tone(494, 160, 100);
+			case 'round-start':
+				return this.tone(392, 150), this.tone(523, 150, 150), this.tone(659, 250, 300);
+			case 'round-end':
+				return this.tone(330, 200), this.tone(262, 350, 250);
+			case 'join':
+				return this.tone(440, 120);
+			case 'tick':
+				return this.tone(800, 60);
+			case 'your-turn':
+				return this.tone(523, 120), this.tone(784, 220, 120);
+			case 'win':
+				return [523, 659, 784, 1047].forEach((f, i) => this.tone(f, 300, i * 140));
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Canvas: an op log (line/fill/undo/clear) rendered onto a HiDPI canvas.
+// The same log is replayed for late joiners and after undo, so every client
+// ends up with the same picture.
+
+class DrawingBoard {
+	constructor(canvas, { onOp }) {
+		this.canvas = canvas;
+		this.ctx = canvas.getContext('2d', { willReadFrequently: true });
+		this.onOp = onOp;
+		this.ops = [];
+		this.enabled = false;
+		this.fillMode = false;
+		this.color = COLORS[0];
+		this.width = 4;
+		this.strokeSeq = 0;
+		this.active = null; // { id, s, points: [], sent: number, op }
+		this.flushScheduled = false;
+		this.lastFlush = 0;
+		this.lobbyArt = false;
+
+		// Fixed 2x backing store on every device, so flood fills land on identical pixels everywhere.
+		// Costs ~6.4 MB of canvas memory on 1x screens; worth it for consistency.
+		this.dpr = 2;
+		canvas.width = CANVAS_W * this.dpr;
+		canvas.height = CANVAS_H * this.dpr;
+		this.reset();
+		this.bindPointer();
+	}
+
+	reset() {
+		const { ctx } = this;
+		ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+		ctx.globalCompositeOperation = 'source-over';
+		ctx.fillStyle = '#ffffff';
+		ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+		this.lobbyArt = false;
+	}
+
+	setEnabled(enabled) {
+		this.enabled = enabled;
+		this.canvas.classList.toggle('disabled-canvas', !enabled);
+		if (!enabled) this.endStroke();
+	}
+
+	/** Replace the whole picture (welcome snapshot or new round). */
+	load(ops) {
+		this.ops = [];
+		this.reset();
+		for (const op of ops) this.apply(op, false);
+		this.strokeSeq = this.ops.reduce((m, op) => Math.max(m, op.s ?? 0), 0);
+	}
+
+	clearLocal() {
+		this.ops = [];
+		this.strokeSeq = 0;
+		this.reset();
+	}
+
+	redraw() {
+		this.reset();
+		for (const op of this.ops) this.render(op);
+	}
+
+	/** Apply an op from the server (or locally) to the log and the canvas. */
+	apply(op) {
+		if (op.k === 'clear') {
+			this.ops = [];
+			this.reset();
+		} else if (op.k === 'undo') {
+			const last = this.ops.reduce((m, o) => Math.max(m, o.s ?? -1), -1);
+			if (last < 0) return;
+			this.ops = this.ops.filter((o) => o.s !== last);
+			this.redraw();
+		} else {
+			if (this.lobbyArt) this.reset();
+			this.ops.push(op);
+			this.render(op);
+		}
+	}
+
+	render(op) {
+		if (op.k === 'line') this.renderLine(op.p, op.c, op.w);
+		else if (op.k === 'fill') this.floodFill(op.x, op.y, op.c);
+	}
+
+	renderLine(p, color, width) {
+		const { ctx } = this;
+		ctx.strokeStyle = color;
+		ctx.fillStyle = color;
+		ctx.lineWidth = width;
+		ctx.lineCap = 'round';
+		ctx.lineJoin = 'round';
+		if (p.length === 2) {
+			ctx.beginPath();
+			ctx.arc(p[0], p[1], width / 2, 0, Math.PI * 2);
+			ctx.fill();
+			return;
+		}
+		ctx.beginPath();
+		ctx.moveTo(p[0], p[1]);
+		// Quadratic smoothing through midpoints gives much nicer curves than straight segments.
+		for (let i = 2; i < p.length - 2; i += 2) {
+			const mx = (p[i] + p[i + 2]) / 2;
+			const my = (p[i + 1] + p[i + 3]) / 2;
+			ctx.quadraticCurveTo(p[i], p[i + 1], mx, my);
+		}
+		ctx.lineTo(p[p.length - 2], p[p.length - 1]);
+		ctx.stroke();
+	}
+
+	/** Scanline flood fill with a small tolerance so anti-aliased edges don't leave halos. */
+	floodFill(lx, ly, hex) {
+		const { canvas, ctx, dpr } = this;
+		const W = canvas.width;
+		const H = canvas.height;
+		const sx = Math.floor(lx * dpr);
+		const sy = Math.floor(ly * dpr);
+		if (sx < 0 || sy < 0 || sx >= W || sy >= H) return;
+		const img = ctx.getImageData(0, 0, W, H);
+		const d = img.data;
+		const fr = parseInt(hex.slice(1, 3), 16);
+		const fg = parseInt(hex.slice(3, 5), 16);
+		const fb = parseInt(hex.slice(5, 7), 16);
+		const start = (sy * W + sx) * 4;
+		const tr = d[start], tg = d[start + 1], tb = d[start + 2], ta = d[start + 3];
+		if (Math.abs(tr - fr) + Math.abs(tg - fg) + Math.abs(tb - fb) < 8 && ta === 255) return;
+		const TOL = 96;
+		const visited = new Uint8Array(W * H);
+		const match = (i) => {
+			const o = i * 4;
+			return !visited[i] && Math.abs(d[o] - tr) + Math.abs(d[o + 1] - tg) + Math.abs(d[o + 2] - tb) + Math.abs(d[o + 3] - ta) <= TOL;
+		};
+		const paint = (i) => {
+			const o = i * 4;
+			d[o] = fr;
+			d[o + 1] = fg;
+			d[o + 2] = fb;
+			d[o + 3] = 255;
+			visited[i] = 1;
+		};
+		const stack = [sx, sy];
+		while (stack.length) {
+			const y = stack.pop();
+			let x = stack.pop();
+			let i = y * W + x;
+			while (x > 0 && match(i - 1)) {
+				x--;
+				i--;
+			}
+			let up = false;
+			let down = false;
+			for (; x < W && match(i); x++, i++) {
+				paint(i);
+				if (y > 0) {
+					const m = match(i - W);
+					if (m && !up) stack.push(x, y - 1);
+					up = m;
+				}
+				if (y < H - 1) {
+					const m = match(i + W);
+					if (m && !down) stack.push(x, y + 1);
+					down = m;
+				}
+			}
+		}
+		ctx.putImageData(img, 0, 0);
+	}
+
+	// --- Local input -------------------------------------------------------
+
+	bindPointer() {
+		const c = this.canvas;
+		const pos = (e) => {
+			const r = c.getBoundingClientRect();
+			return [((e.clientX - r.left) / r.width) * CANVAS_W, ((e.clientY - r.top) / r.height) * CANVAS_H];
+		};
+		c.addEventListener('pointerdown', (e) => {
+			if (!this.enabled || (e.pointerType === 'mouse' && e.button !== 0)) return;
+			e.preventDefault();
+			const [x, y] = pos(e);
+			if (this.fillMode) {
+				const op = { k: 'fill', s: ++this.strokeSeq, c: this.color, x: Math.floor(x), y: Math.floor(y) };
+				this.apply(op);
+				this.onOp(op);
+				return;
+			}
+			c.setPointerCapture(e.pointerId);
+			const s = ++this.strokeSeq;
+			this.active = { pointerId: e.pointerId, s, pending: [x, y], last: null };
+			if (this.lobbyArt) this.reset();
+			this.renderLine([x, y], this.color, this.width);
+			this.scheduleFlush();
+		});
+		c.addEventListener('pointermove', (e) => {
+			const a = this.active;
+			if (!a || a.pointerId !== e.pointerId) return;
+			const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+			for (const ev of events.length ? events : [e]) {
+				const [x, y] = pos(ev);
+				const prev = a.pending.length ? a.pending.slice(-2) : a.last;
+				if (prev && Math.abs(prev[0] - x) + Math.abs(prev[1] - y) < 1) continue;
+				if (prev) this.renderLine([prev[0], prev[1], x, y], this.color, this.width);
+				a.pending.push(x, y);
+			}
+			this.scheduleFlush();
+		});
+		const end = (e) => {
+			if (this.active && this.active.pointerId === e.pointerId) this.endStroke();
+		};
+		c.addEventListener('pointerup', end);
+		c.addEventListener('pointercancel', end);
+		c.addEventListener('lostpointercapture', end);
+	}
+
+	scheduleFlush() {
+		if (this.flushScheduled) return;
+		this.flushScheduled = true;
+		// Batch points into at most ~30 messages/s (whatever the display refresh rate) instead of one per mousemove.
+		const wait = Math.max(0, 33 - (performance.now() - this.lastFlush));
+		setTimeout(() => {
+			this.flushScheduled = false;
+			this.lastFlush = performance.now();
+			this.flush();
+		}, wait);
+	}
+
+	flush() {
+		const a = this.active;
+		if (!a || a.pending.length === 0) return;
+		// Each batch starts at the previous batch's last point so segments join up.
+		const p = a.last ? [a.last[0], a.last[1], ...a.pending] : a.pending;
+		// Server caps an op at 512 points; overlap chunks by one point.
+		for (let i = 0; i < p.length; i += 1000) {
+			const chunk = p.slice(Math.max(0, i - 2), i + 1000);
+			const op = { k: 'line', s: a.s, c: this.color, w: this.width, p: chunk.map((v) => Math.round(v * 10) / 10) };
+			this.ops.push(op);
+			this.onOp(op);
+		}
+		a.last = p.slice(-2);
+		a.pending = [];
+	}
+
+	endStroke() {
+		if (!this.active) return;
+		this.flush();
+		this.active = null;
+	}
+
+	undo() {
+		this.endStroke();
+		const op = { k: 'undo' };
+		this.apply(op);
+		this.onOp(op);
+	}
+
+	clear() {
+		this.endStroke();
+		const op = { k: 'clear' };
+		this.apply(op);
+		this.onOp(op);
+	}
+
+	canUndo() {
+		return this.ops.length > 0;
+	}
+
+	drawLobbyArt() {
+		const { ctx } = this;
+		this.reset();
+		const palettes = [['#667eea', '#764ba2'], ['#f093fb', '#f5576c'], ['#4facfe', '#00f2fe'], ['#fa709a', '#fee140'], ['#fdbb2d', '#22c1c3']];
+		const [a, b] = palettes[Math.floor(Math.random() * palettes.length)];
+		const g = ctx.createRadialGradient(CANVAS_W / 2, CANVAS_H / 2, 0, CANVAS_W / 2, CANVAS_H / 2, CANVAS_W / 2);
+		g.addColorStop(0, a);
+		g.addColorStop(1, b);
+		ctx.fillStyle = g;
+		ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+		ctx.fillStyle = 'rgba(255,255,255,0.12)';
+		for (let i = 0; i < 9; i++) {
+			ctx.beginPath();
+			ctx.arc(Math.random() * CANVAS_W, Math.random() * CANVAS_H, 20 + Math.random() * 60, 0, Math.PI * 2);
+			ctx.fill();
+		}
+		ctx.fillStyle = 'white';
+		ctx.textAlign = 'center';
+		ctx.shadowColor = 'rgba(0,0,0,0.35)';
+		ctx.shadowBlur = 6;
+		ctx.font = 'bold 30px Inter, system-ui, sans-serif';
+		ctx.fillText('Waiting for the game to start…', CANVAS_W / 2, CANVAS_H / 2 - 10);
+		ctx.font = '18px Inter, system-ui, sans-serif';
+		ctx.fillText('🎨 Share the link and get ready to doodle!', CANVAS_W / 2, CANVAS_H / 2 + 26);
+		ctx.shadowBlur = 0;
+		this.lobbyArt = true;
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Connection: one WebSocket with keepalive and backoff reconnects.
+
+class Connection {
+	constructor({ onMessage, onStatus, onFatal }) {
+		this.onMessage = onMessage;
+		this.onStatus = onStatus;
+		this.onFatal = onFatal;
+		this.ws = null;
+		this.url = null;
+		this.attempt = 0;
+		this.timers = {};
+		this.closedByUs = false;
+	}
+
+	open(url, token) {
+		this.close();
+		this.url = url;
+		this.token = token;
+		this.closedByUs = false;
+		this.attempt = 0;
+		this.connect();
+	}
+
+	connect() {
+		clearTimeout(this.timers.retry);
+		const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+		// The session token rides in the subprotocol header so it never shows up in URLs or logs.
+		const ws = new WebSocket(`${proto}//${location.host}${this.url}`, ['wutizzit', this.token]);
+		this.ws = ws;
+		this.onStatus(this.attempt === 0 ? 'connecting' : 'reconnecting');
+
+		ws.addEventListener('open', () => {
+			this.attempt = 0;
+			this.onStatus('online');
+			this.startHeartbeat();
+		});
+		ws.addEventListener('message', (e) => {
+			if (this.ws !== ws) return;
+			if (e.data === 'pong') {
+				clearTimeout(this.timers.pongWait);
+				return;
+			}
+			try {
+				this.onMessage(JSON.parse(e.data));
+			} catch (err) {
+				console.error('Bad message', err);
+			}
+		});
+		ws.addEventListener('close', (e) => {
+			if (this.ws !== ws) return;
+			this.stopHeartbeat();
+			this.ws = null;
+			if (this.closedByUs) return;
+			if (e.code >= 4000 && e.code < 5000) return this.onFatal(e.code, e.reason);
+			this.scheduleRetry();
+		});
+	}
+
+	scheduleRetry() {
+		const delay = Math.min(8000, 500 * 2 ** this.attempt) * (0.75 + Math.random() * 0.5);
+		this.attempt++;
+		this.onStatus('reconnecting');
+		this.timers.retry = setTimeout(() => this.connect(), delay);
+	}
+
+	startHeartbeat() {
+		this.stopHeartbeat();
+		this.timers.ping = setInterval(() => {
+			if (this.ws?.readyState !== WebSocket.OPEN) return;
+			this.ws.send('ping');
+			clearTimeout(this.timers.pongWait);
+			// No pong in 10s: the socket is dead even if the browser hasn't noticed. Drop it and
+			// reconnect now rather than waiting for the browser's close handshake to time out.
+			this.timers.pongWait = setTimeout(() => {
+				const dead = this.ws;
+				this.ws = null;
+				this.stopHeartbeat();
+				try {
+					dead?.close();
+				} catch {}
+				this.scheduleRetry();
+			}, 10_000);
+		}, 25_000);
+	}
+
+	stopHeartbeat() {
+		clearInterval(this.timers.ping);
+		clearTimeout(this.timers.pongWait);
+	}
+
+	send(msg) {
+		if (this.ws?.readyState === WebSocket.OPEN) {
+			this.ws.send(JSON.stringify(msg));
+			return true;
+		}
+		return false;
+	}
+
+	close() {
+		this.closedByUs = true;
+		clearTimeout(this.timers.retry);
+		this.stopHeartbeat();
+		this.ws?.close(1000, 'bye');
+		this.ws = null;
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The app
+
+class GameClient {
+	constructor() {
+		this.state = null;
+		this.roomId = null;
+		this.playerId = null;
+		this.customWords = null;
+		this.deadline = null;
+		this.lastTick = null;
+		this.shownResults = new Set();
+		this.lobbyTimer = null;
+
+		this.el = {
+			home: $('home-screen'),
+			game: $('game-screen'),
+			username: $('username-input'),
+			roomInput: $('room-input'),
+			joinForm: $('join-form'),
+			createBtn: $('create-room-btn'),
+			joinBtn: $('join-room-btn'),
+			invite: $('invite-banner'),
+			homeError: $('home-error'),
+			gamesList: $('active-games-list'),
+			games: $('games-container'),
+			activeGames: $('active-games'),
+			totalPlayers: $('total-players'),
+			roomId: $('room-id-display'),
+			status: $('game-status'),
+			conn: $('connection-status'),
+			timer: $('timer'),
+			roundInfo: $('round-info'),
+			wordDisplay: $('word-display'),
+			currentWord: $('current-word'),
+			wordHint: $('word-hint'),
+			hintText: $('hint-text'),
+			letterCount: $('letter-count'),
+			tools: $('drawing-tools'),
+			swatches: $('color-picker-grid'),
+			brush: $('brush-size'),
+			fillBtn: $('fill-tool'),
+			undoBtn: $('undo-canvas'),
+			clearBtn: $('clear-canvas'),
+			overlay: $('canvas-overlay'),
+			players: $('players-list'),
+			playerCount: $('player-count'),
+			chat: $('chat-messages'),
+			chatForm: $('chat-form'),
+			chatInput: $('chat-input'),
+			settings: $('game-settings'),
+			rounds: $('rounds-setting'),
+			duration: $('duration-setting'),
+			choices: $('word-choices-setting'),
+			startBtn: $('start-game-btn'),
+			pauseBtn: $('pause-game-btn'),
+			copyBtn: $('copy-room-link'),
+			leaveBtn: $('leave-room-btn'),
+			wordsBtn: $('word-list-btn'),
+			wordsModal: $('word-list-modal'),
+			wordsText: $('custom-words'),
+			wordsCount: $('custom-words-count'),
+			winnerModal: $('winner-modal'),
+			winnerTitle: $('winner-title'),
+			gif: $('celebration-gif'),
+		};
+
+		this.sound = new Sound($('mute-btn'));
+		this.board = new DrawingBoard($('game-canvas'), {
+			onOp: (op) => {
+				this.conn.send({ type: 'draw', op });
+				this.updateUndo();
+			},
+		});
+		this.conn = new Connection({
+			onMessage: (m) => this.onMessage(m),
+			onStatus: (s) => this.setConnStatus(s),
+			onFatal: (code, reason) => this.onFatalClose(code, reason),
+		});
+
+		this.bindUi();
+		this.el.username.value = store.get('wutizzit:name') || randomName();
+		this.route();
+		window.addEventListener('popstate', () => this.route());
+		setInterval(() => this.tick(), 250);
+	}
+
+	// --- Routing / home ----------------------------------------------------
+
+	route() {
+		const m = location.pathname.match(/^\/room\/([A-Za-z0-9]{6})\/?$/);
+		if (m) {
+			const roomId = m[1].toUpperCase();
+			if (this.roomId === roomId) return;
+			if (this.roomId) this.leave(false);
+			this.el.roomInput.value = roomId;
+			// Returning to a room in this tab (refresh): rejoin straight away.
+			if (session.get(roomId)) return this.join(roomId);
+			this.showHome();
+			this.el.invite.textContent = `🎉 You're invited to room ${roomId}! Pick a name and hit Join.`;
+			show(this.el.invite);
+			this.el.joinBtn.textContent = 'Join room';
+			this.el.username.focus();
+			this.el.username.select();
+			return;
+		}
+		if (this.roomId) this.leave(false);
+		this.showHome();
+	}
+
+	showHome(error) {
+		show(this.el.game, false);
+		show(this.el.home);
+		show(this.el.homeError, !!error);
+		if (error) this.el.homeError.textContent = error;
+		this.refreshLobby();
+		clearInterval(this.lobbyTimer);
+		this.lobbyTimer = setInterval(() => document.visibilityState === 'visible' && this.refreshLobby(), 5000);
+		document.title = 'Wutizzit – Draw, Guess, Win!';
+	}
+
+	showGame() {
+		clearInterval(this.lobbyTimer);
+		show(this.el.home, false);
+		show(this.el.invite, false);
+		show(this.el.homeError, false);
+		show(this.el.game);
+	}
+
+	async refreshLobby() {
+		try {
+			const res = await fetch('/api/lobby');
+			if (!res.ok) throw new Error(res.statusText);
+			const data = await res.json();
+			this.el.activeGames.textContent = data.activeGames ?? 0;
+			this.el.totalPlayers.textContent = data.totalPlayers ?? 0;
+			this.el.games.replaceChildren(
+				...data.games.map((g) =>
+					h(
+						'li',
+						{},
+						h(
+							'button',
+							{
+								class: 'w-full p-2 bg-white rounded border flex justify-between items-center hover:bg-gray-50 text-left',
+								onclick: () => {
+									this.el.roomInput.value = g.id;
+									this.join(g.id);
+								},
+							},
+							h('span', {}, h('span', { class: 'font-mono font-medium text-sm tracking-wider', text: g.id }), h('span', { class: 'block text-xs text-gray-500', text: `${g.playerCount} player${g.playerCount === 1 ? '' : 's'} • ${g.inGame ? 'In game' : 'Waiting to start'}` })),
+							h('span', { class: 'px-2 py-1 bg-blue-500 text-white text-xs rounded', text: 'Join' }),
+						),
+					),
+				),
+			);
+			show(this.el.gamesList, data.games.length > 0);
+		} catch {
+			this.el.activeGames.textContent = '–';
+			this.el.totalPlayers.textContent = '–';
+		}
+	}
+
+	async createRoom() {
+		if (!this.validName()) return;
+		this.busy(true);
+		try {
+			const res = await fetch('/rooms', { method: 'POST' });
+			const data = await res.json();
+			if (!res.ok) throw new Error(data.error || 'Could not create a room.');
+			await this.join(data.roomId);
+		} catch (err) {
+			this.showHome(err.message);
+		} finally {
+			this.busy(false);
+		}
+	}
+
+	async join(roomId) {
+		roomId = String(roomId || '').trim().toUpperCase();
+		if (!/^[A-Z0-9]{6}$/.test(roomId)) return this.showHome('Room codes are 6 letters or numbers.');
+		const username = this.validName();
+		if (!username) return;
+		this.busy(true);
+		try {
+			const res = await fetch(`/rooms/${roomId}/join`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ username, token: session.get(roomId) }),
+			});
+			const data = await res.json();
+			if (!res.ok) {
+				if (res.status === 404) session.clear(roomId);
+				throw new Error(data.error || 'Could not join the room.');
+			}
+			store.set('wutizzit:name', username);
+			session.set(roomId, data.token);
+			this.roomId = roomId;
+			this.playerId = data.playerId;
+			this.state = null;
+			this.el.roomId.textContent = roomId;
+			this.el.chat.replaceChildren();
+			if (location.pathname !== `/room/${roomId}`) history.pushState({ roomId }, '', `/room/${roomId}`);
+			document.title = `Room ${roomId} · Wutizzit`;
+			this.showGame();
+			this.conn.open(`/rooms/${roomId}/ws`, data.token);
+		} catch (err) {
+			this.showHome(err.message);
+		} finally {
+			this.busy(false);
+		}
+	}
+
+	leave(navigate = true) {
+		this.conn.send({ type: 'leave' });
+		this.conn.close();
+		if (this.roomId) session.clear(this.roomId);
+		this.resetRoom();
+		if (navigate && location.pathname !== '/') history.pushState({}, '', '/');
+		this.showHome();
+	}
+
+	resetRoom() {
+		this.roomId = null;
+		this.playerId = null;
+		this.state = null;
+		this.deadline = null;
+		this.board.setEnabled(false);
+		this.board.clearLocal();
+		this.el.roomInput.value = '';
+		this.el.joinBtn.textContent = 'Join';
+	}
+
+	validName() {
+		const name = this.el.username.value.replace(/\s+/g, ' ').trim();
+		if (!name) {
+			this.el.username.focus();
+			this.showHome('Please enter a name first.');
+			return null;
+		}
+		return name;
+	}
+
+	busy(on) {
+		this.el.createBtn.disabled = on;
+		this.el.joinBtn.disabled = on;
+	}
+
+	onFatalClose(code) {
+		const roomId = this.roomId;
+		if (code === CLOSE.replaced) {
+			this.el.status.textContent = '📑 This room is open in another tab.';
+			this.setConnStatus('offline');
+			this.showOverlay(h('p', { class: 'text-lg', text: 'You opened this room in another tab.' }), h('button', { class: 'px-4 py-2 fun-button rounded-lg', text: 'Play here instead', onclick: () => this.join(roomId) }));
+			return;
+		}
+		if (code === CLOSE.invalidSession && roomId) {
+			// Our seat timed out (e.g. laptop slept). Try to grab a fresh one.
+			session.clear(roomId);
+			this.resetRoom();
+			return this.join(roomId);
+		}
+		session.clear(roomId);
+		this.resetRoom();
+		history.pushState({}, '', '/');
+		this.showHome(code === CLOSE.kicked ? '🚫 The room owner removed you from the game.' : code === CLOSE.roomClosed ? 'That room has closed.' : undefined);
+	}
+
+	setConnStatus(s) {
+		const c = this.el.conn;
+		const labels = { connecting: '⏳ Connecting…', reconnecting: '⚠️ Reconnecting…', offline: '⛔ Offline', online: '' };
+		c.textContent = labels[s] ?? '';
+		c.className = `text-xs font-medium ${s === 'online' ? 'hidden' : s === 'offline' ? 'text-red-600' : 'text-amber-600'}`;
+	}
+
+	// --- Messages ----------------------------------------------------------
+
+	onMessage(msg) {
+		switch (msg.type) {
+			case 'welcome':
+				this.el.chat.replaceChildren();
+				for (const m of msg.chat) this.addChat(m, false);
+				this.applyState(msg.state, true);
+				if (msg.state.phase !== 'lobby') this.board.load(msg.ops);
+				this.updateUndo();
+				break;
+			case 'state':
+				this.applyState(msg.state, false);
+				break;
+			case 'chat':
+				this.addChat(msg.msg, true);
+				break;
+			case 'draw':
+				this.board.apply(msg.op);
+				break;
+			case 'resync': {
+				// The server dropped one of our ops (flood control or full canvas): match its picture,
+				// but never reuse stroke ids, or a later undo would remove two strokes.
+				const seq = this.board.strokeSeq;
+				this.board.load(msg.ops);
+				this.board.strokeSeq = Math.max(seq, this.board.strokeSeq);
+				this.updateUndo();
+				break;
+			}
+			case 'notice':
+				this.addChat({ kind: 'notice', text: msg.text, ts: Date.now() }, false);
+				if (msg.text.includes('close')) this.sound.play('close');
+				break;
+		}
+	}
+
+	applyState(next, initial) {
+		const prev = this.state;
+		this.state = next;
+		this.deadline = next.remaining == null ? null : performance.now() + next.remaining;
+		const me = next.you.id;
+		const round = next.round;
+		const isDrawer = round?.drawerId === me;
+		const phaseChanged = !prev || prev.phase !== next.phase || prev.roundNumber !== next.roundNumber;
+
+		// Canvas lifecycle.
+		if (phaseChanged) {
+			if (next.phase === 'choosing') this.board.clearLocal();
+			if (next.phase === 'lobby' && (initial || prev?.phase !== 'lobby')) this.board.drawLobbyArt();
+			if (!initial) {
+				if (next.phase === 'choosing') this.sound.play(isDrawer ? 'your-turn' : 'round-start');
+				if (next.phase === 'intermission') this.sound.play('round-end');
+			}
+		}
+		if (prev && next.players.length > prev.players.length && !initial) this.sound.play('join');
+
+		const canDraw = next.phase === 'drawing' && isDrawer && !next.paused;
+		this.board.setEnabled(canDraw);
+		show(this.el.tools, next.phase === 'drawing' && isDrawer);
+
+		this.renderHeader(next, isDrawer);
+		this.renderWord(next, isDrawer);
+		this.renderOverlay(next, isDrawer);
+		this.renderPlayers(next);
+		this.renderOwnerControls(next);
+		this.renderChatInput(next, isDrawer);
+
+		if (next.results && !this.shownResults.has(next.results.id)) {
+			this.shownResults.add(next.results.id);
+			if (!initial) this.showWinner(next.results);
+		}
+	}
+
+	renderHeader(s, isDrawer) {
+		const drawer = s.players.find((p) => p.id === s.round?.drawerId);
+		const lines = {
+			lobby: s.players.length < 2 ? '⏳ Waiting for more players. Share the link!' : s.you.isOwner ? '✅ Ready when you are. Hit Start!' : '⏳ Waiting for the owner to start…',
+			choosing: isDrawer ? '📝 Pick a word to draw!' : `🤔 ${drawer?.username ?? 'Someone'} is choosing a word…`,
+			drawing: isDrawer ? '🎨 You are drawing!' : s.round?.guessed ? '✅ You got it! Watch the others squirm.' : `🤔 Guess what ${drawer?.username ?? 'they'} is drawing!`,
+			intermission: '⏰ Round over!',
+		};
+		this.el.status.textContent = s.paused ? '⏸️ Game paused by the room owner' : lines[s.phase];
+		this.el.roundInfo.textContent = s.phase === 'lobby' ? `${s.players.length}/10 players` : `Round ${s.roundNumber} of ${s.maxRounds}`;
+	}
+
+	renderWord(s, isDrawer) {
+		const round = s.round;
+		const showWord = !!round?.word && (isDrawer || round.guessed);
+		show(this.el.wordDisplay, showWord);
+		if (showWord) this.el.currentWord.textContent = round.word;
+		const showHint = !showWord && s.phase === 'drawing' && !!round?.hint;
+		show(this.el.wordHint, showHint);
+		if (showHint) {
+			this.el.hintText.textContent = round.hint;
+			const letters = [...round.hint].filter((c) => /[\p{L}\p{N}_]/u.test(c)).length;
+			const words = round.hint.split(/\s+/).filter(Boolean).length;
+			this.el.letterCount.textContent = `(${letters} letters${words > 1 ? `, ${words} words` : ''})`;
+		}
+	}
+
+	renderOverlay(s, isDrawer) {
+		const round = s.round;
+		if (s.paused) return this.showOverlay(h('p', { class: 'text-3xl', text: '⏸️' }), h('p', { class: 'text-xl font-semibold', text: 'Paused' }));
+		if (s.phase === 'choosing' && isDrawer && round?.choices) {
+			return this.showOverlay(
+				h('p', { class: 'text-xl font-semibold', text: 'Choose a word to draw' }),
+				h('div', { class: 'flex flex-wrap gap-2 justify-center' }, round.choices.map((word, i) => h('button', { class: 'px-4 py-2 fun-button rounded-lg text-lg', text: word, onclick: () => this.conn.send({ type: 'choose', index: i }) }))),
+				h('p', { class: 'text-sm opacity-80', 'data-countdown': '', text: '' }),
+			);
+		}
+		if (s.phase === 'choosing') {
+			const drawer = s.players.find((p) => p.id === round?.drawerId);
+			return this.showOverlay(h('p', { class: 'text-4xl', text: avatarFor(round?.drawerId ?? '') }), h('p', { class: 'text-xl font-semibold', text: `${drawer?.username ?? 'Someone'} is choosing a word…` }));
+		}
+		if (s.phase === 'intermission' && !s.lastRound) {
+			return this.showOverlay(h('p', { class: 'text-xl font-semibold', text: '⏭️ Skipping this turn…' }));
+		}
+		if (s.phase === 'intermission' && s.lastRound) {
+			const lr = s.lastRound;
+			const drawer = s.players.find((p) => p.id === lr.drawerId);
+			return this.showOverlay(
+				h('p', { class: 'text-sm uppercase tracking-wider opacity-80', text: 'The word was' }),
+				h('p', { class: 'text-3xl font-bold', text: lr.word }),
+				h(
+					'ul',
+					{ class: 'text-sm space-y-1' },
+					lr.scoreUpdates.length === 0 ? h('li', { text: '😅 Nobody got it this time!' }) : lr.scoreUpdates.map((u) => h('li', { text: `🎉 ${u.username} +${u.points}` })),
+					lr.drawerPoints > 0 && drawer ? h('li', { text: `🎨 ${drawer.username} +${lr.drawerPoints}` }) : null,
+				),
+			);
+		}
+		this.hideOverlay();
+	}
+
+	showOverlay(...children) {
+		this.el.overlay.replaceChildren(...children);
+		show(this.el.overlay);
+	}
+
+	hideOverlay() {
+		show(this.el.overlay, false);
+		this.el.overlay.replaceChildren();
+	}
+
+	renderPlayers(s) {
+		const maxScore = Math.max(0, ...s.players.map((p) => p.score));
+		const sorted = [...s.players].sort((a, b) => b.score - a.score);
+		this.el.playerCount.textContent = `(${s.players.length}/10)`;
+		this.el.players.replaceChildren(
+			...sorted.map((p, i) => {
+				const isMe = p.id === s.you.id;
+				const badges = [p.id === s.ownerId ? '👑' : '', p.isDrawer ? '🎨' : '', p.guessed ? '✅' : '', maxScore > 0 && p.score === maxScore ? '🏅' : ''].join('');
+				const ring = p.isDrawer ? 'ring-2 ring-green-400' : isMe ? 'ring-2 ring-blue-400' : '';
+				return h(
+					'li',
+					{ class: `flex justify-between items-center gap-2 p-2.5 player-card ${ring} ${p.connected ? '' : 'offline'}` },
+					h(
+						'div',
+						{ class: 'flex items-center gap-2 min-w-0' },
+						h('span', { class: 'text-sm text-gray-600 w-5 text-right tabular-nums', text: `#${i + 1}` }),
+						h('span', { class: 'text-lg', 'aria-hidden': 'true', text: avatarFor(p.id) }),
+						h('span', { class: `truncate ${isMe ? 'font-bold text-blue-800' : 'font-medium'}`, title: p.username, text: p.username }),
+						isMe ? h('span', { class: 'text-xs text-blue-700', text: '(you)' }) : null,
+						p.connected ? null : h('span', { class: 'text-xs text-gray-600', title: 'Reconnecting', text: '📡' }),
+						badges ? h('span', { class: 'shrink-0', text: badges }) : null,
+					),
+					h(
+						'div',
+						{ class: 'flex items-center gap-2 shrink-0' },
+						h('span', { class: 'text-sm font-bold tabular-nums', text: p.score }),
+						s.you.isOwner && !isMe ? h('button', { class: 'text-xs px-1.5 py-0.5 bg-red-500 text-white rounded hover:bg-red-600', title: `Remove ${p.username}`, 'aria-label': `Remove ${p.username}`, text: '🚫', onclick: () => this.kick(p) }) : null,
+					),
+				);
+			}),
+		);
+	}
+
+	renderOwnerControls(s) {
+		const owner = s.you.isOwner;
+		const lobby = s.phase === 'lobby';
+		show(this.el.settings, owner && lobby);
+		show(this.el.startBtn, owner && lobby);
+		const ready = s.players.filter((p) => p.connected).length;
+		this.el.startBtn.disabled = ready < 2;
+		this.el.startBtn.textContent = ready < 2 ? '⏳ Need 2+ players' : s.results ? '🔁 Play again' : '🚀 Start game';
+		show(this.el.pauseBtn, owner && (s.phase === 'drawing' || s.phase === 'choosing'));
+		this.el.pauseBtn.textContent = s.paused ? '▶️ Resume' : '⏸️ Pause';
+		if (owner && lobby) this.updateRoundOptions(Math.max(2, s.players.length));
+	}
+
+	updateRoundOptions(playerCount) {
+		const sel = this.el.rounds;
+		const current = Number(sel.value) || 0;
+		const key = String(playerCount);
+		if (sel.dataset.players === key) return;
+		sel.dataset.players = key;
+		// Multiples of the player count so everyone draws the same number of times.
+		const opts = [1, 2, 3, 4, 5].map((n) => n * playerCount).filter((r) => r <= 50);
+		sel.replaceChildren(...opts.map((r) => h('option', { value: r, text: `${r} (${r / playerCount}× each)` })));
+		sel.value = opts.includes(current) ? current : opts[Math.min(1, opts.length - 1)];
+	}
+
+	renderChatInput(s, isDrawer) {
+		const input = this.el.chatInput;
+		if (s.phase !== 'drawing') input.placeholder = 'Say hi…';
+		else if (isDrawer) input.placeholder = 'Chat with players who guessed…';
+		else if (s.round?.guessed) input.placeholder = 'Chat with the others who got it…';
+		else input.placeholder = 'Type your guess…';
+		input.disabled = s.paused;
+	}
+
+	addChat(m, live) {
+		const s = this.state;
+		const cls = m.kind === 'system' ? 'system' : m.kind === 'correct' ? 'correct' : m.kind === 'notice' ? 'notice' : m.round ? 'private' : '';
+		const time = new Date(m.ts || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+		const node = h(
+			'div',
+			{ class: `chat-bubble ${cls}` },
+			h('span', { class: 'opacity-70 text-xs mr-1', text: time }),
+			m.username && m.kind === 'chat' ? h('span', { class: 'font-semibold mr-1', text: `${m.username}:` }) : null,
+			m.kind === 'chat' && m.round ? h('span', { title: 'Only visible to the drawer and players who guessed', text: '🤫 ' }) : null,
+			m.text,
+		);
+		const box = this.el.chat;
+		const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+		box.append(node);
+		while (box.childElementCount > 120) box.firstElementChild.remove();
+		if (atBottom || !live) box.scrollTop = box.scrollHeight;
+
+		if (live && m.kind === 'correct') this.sound.play(m.playerId === s?.you.id ? 'correct' : 'other-correct');
+		if (live && m.kind === 'chat' && m.playerId === s?.you.id && s?.phase === 'drawing' && !s.round?.guessed && s.round?.drawerId !== s.you.id) this.sound.play('wrong');
+	}
+
+	// --- Actions -----------------------------------------------------------
+
+	sendChat() {
+		const text = this.el.chatInput.value.trim();
+		if (!text) return;
+		if (this.conn.send({ type: 'chat', text })) this.el.chatInput.value = '';
+	}
+
+	startGame() {
+		this.conn.send({
+			type: 'start',
+			settings: {
+				maxRounds: Number(this.el.rounds.value),
+				roundDuration: Number(this.el.duration.value),
+				wordChoiceCount: Number(this.el.choices.value),
+			},
+			words: this.customWords,
+		});
+	}
+
+	kick(player) {
+		if (confirm(`Remove ${player.username} from the room? Nobody on their network can rejoin for 10 minutes.`)) this.conn.send({ type: 'kick', playerId: player.id });
+	}
+
+	async shareLink() {
+		const url = `${location.origin}/room/${this.roomId}`;
+		const btn = this.el.copyBtn;
+		const flash = (text) => {
+			btn.textContent = text;
+			setTimeout(() => (btn.textContent = '📋 Share link'), 2000);
+		};
+		if (navigator.share && matchMedia('(pointer: coarse)').matches) {
+			try {
+				await navigator.share({ title: 'Join my Wutizzit game!', text: `Come draw with me in room ${this.roomId}`, url });
+				return;
+			} catch (err) {
+				if (err?.name === 'AbortError') return;
+			}
+		}
+		try {
+			await navigator.clipboard.writeText(url);
+			flash('✅ Copied!');
+		} catch {
+			prompt('Copy this link:', url);
+		}
+	}
+
+	openWords() {
+		this.el.wordsText.value = this.customWords ? this.customWords.join('\n') : '';
+		this.updateWordCount();
+		this.el.wordsModal.returnValue = '';
+		this.el.wordsModal.showModal();
+	}
+
+	parseWords() {
+		const seen = new Set();
+		return this.el.wordsText.value
+			.split(/[,\n]/)
+			.map((w) => w.trim())
+			.filter((w) => {
+				const key = w.toLowerCase();
+				if (!w || w.length > 30 || seen.has(key)) return false;
+				seen.add(key);
+				return true;
+			});
+	}
+
+	updateWordCount() {
+		const n = this.parseWords().length;
+		this.el.wordsCount.textContent = n === 0 ? 'Using the built-in word list.' : `${n} word${n === 1 ? '' : 's'}${n < 5 ? ' (need at least 5)' : ''}`;
+	}
+
+	onWordsClosed() {
+		if (this.el.wordsModal.returnValue !== 'save') return;
+		const words = this.parseWords();
+		if (words.length && words.length < 5) {
+			this.addChat({ kind: 'notice', text: 'Custom lists need at least 5 words. Still using the previous list.', ts: Date.now() }, false);
+			return;
+		}
+		this.customWords = words.length ? words : null;
+		this.el.wordsBtn.textContent = this.customWords ? `📝 Custom words (${words.length})` : '📝 Custom words';
+	}
+
+	showWinner(results) {
+		const top = results.finalScores;
+		const me = this.state?.you.id;
+		this.el.winnerTitle.textContent = results.reason ? `🏁 ${results.reason}` : top[0]?.id === me ? '🎉 You won! 🎉' : '🎉 Game complete! 🎉';
+		[1, 2, 3].forEach((place) => {
+			const slot = $(`podium-${place}`);
+			const p = top[place - 1];
+			slot.style.visibility = p ? 'visible' : 'hidden';
+			slot.querySelector('.podium-name').textContent = p?.username ?? '–';
+			slot.querySelector('.podium-score').textContent = p ? `${p.score} pts` : '';
+		});
+		const gif = this.el.gif;
+		gif.onerror = () => show(gif, false);
+		gif.onload = () => show(gif, true);
+		gif.src = CELEBRATION_GIFS[Math.floor(Math.random() * CELEBRATION_GIFS.length)];
+		this.sound.play('win');
+		if (!this.el.winnerModal.open) this.el.winnerModal.showModal();
+	}
+
+	updateUndo() {
+		this.el.undoBtn.disabled = !this.board.canUndo();
+	}
+
+	tick() {
+		const s = this.state;
+		if (!s || this.deadline == null) {
+			this.el.timer.textContent = s?.phase === 'lobby' ? '–' : this.el.timer.textContent;
+			this.el.timer.classList.remove('timer-urgent');
+			return;
+		}
+		const remaining = s.paused ? s.remaining : Math.max(0, this.deadline - performance.now());
+		this.el.timer.textContent = formatTime(remaining);
+		const secs = Math.ceil(remaining / 1000);
+		const urgent = s.phase === 'drawing' && !s.paused && secs <= 10 && secs > 0;
+		this.el.timer.classList.toggle('timer-urgent', urgent);
+		if (urgent && this.lastTick !== secs) this.sound.play('tick');
+		this.lastTick = secs;
+		const cd = this.el.overlay.querySelector('[data-countdown]');
+		if (cd) cd.textContent = `${secs}s left to choose (we'll pick one for you)`;
+	}
+
+	// --- Wiring ------------------------------------------------------------
+
+	bindUi() {
+		const e = this.el;
+		e.joinForm.addEventListener('submit', (ev) => {
+			ev.preventDefault();
+			if (e.roomInput.value.trim()) this.join(e.roomInput.value);
+			else this.createRoom();
+		});
+		e.createBtn.addEventListener('click', () => this.createRoom());
+		$('shuffle-name-btn').addEventListener('click', () => {
+			e.username.value = randomName();
+		});
+		e.roomInput.addEventListener('input', () => {
+			e.roomInput.value = e.roomInput.value.toUpperCase().replace(/[^A-Z0-9]/g, '');
+		});
+		$('home-link').addEventListener('click', (ev) => {
+			if (!this.roomId) return;
+			ev.preventDefault();
+			if (confirm('Leave this room?')) this.leave();
+		});
+
+		e.chatForm.addEventListener('submit', (ev) => {
+			ev.preventDefault();
+			this.sendChat();
+		});
+		e.startBtn.addEventListener('click', () => this.startGame());
+		e.pauseBtn.addEventListener('click', () => this.conn.send({ type: 'pause' }));
+		e.leaveBtn.addEventListener('click', () => this.leave());
+		e.copyBtn.addEventListener('click', () => this.shareLink());
+		e.wordsBtn.addEventListener('click', () => this.openWords());
+		e.wordsText.addEventListener('input', () => this.updateWordCount());
+		e.wordsModal.addEventListener('close', () => this.onWordsClosed());
+
+		// Drawing tools
+		e.swatches.replaceChildren(
+			...COLORS.map((c, i) => {
+				const b = h('button', { class: 'color-swatch', 'aria-label': `Colour ${c}`, 'aria-pressed': i === 0 ? 'true' : 'false', dataset: { color: c } });
+				b.style.backgroundColor = c;
+				return b;
+			}),
+		);
+		e.swatches.addEventListener('click', (ev) => {
+			const btn = ev.target.closest('.color-swatch');
+			if (!btn) return;
+			this.board.color = btn.dataset.color;
+			for (const s of e.swatches.children) s.setAttribute('aria-pressed', String(s === btn));
+		});
+		e.brush.addEventListener('input', () => {
+			this.board.width = Number(e.brush.value);
+		});
+		this.board.width = Number(e.brush.value);
+		e.fillBtn.addEventListener('click', () => {
+			this.board.fillMode = !this.board.fillMode;
+			e.fillBtn.setAttribute('aria-pressed', String(this.board.fillMode));
+			e.fillBtn.classList.toggle('ring-2', this.board.fillMode);
+			e.fillBtn.classList.toggle('ring-green-300', this.board.fillMode);
+			this.board.canvas.classList.toggle('fill-mode', this.board.fillMode);
+		});
+		e.undoBtn.addEventListener('click', () => {
+			this.board.undo();
+			this.updateUndo();
+		});
+		e.clearBtn.addEventListener('click', () => {
+			this.board.clear();
+			this.updateUndo();
+		});
+		document.addEventListener('keydown', (ev) => {
+			if (!this.board.enabled) return;
+			if ((ev.metaKey || ev.ctrlKey) && ev.key.toLowerCase() === 'z') {
+				ev.preventDefault();
+				this.board.undo();
+				this.updateUndo();
+			}
+		});
+
+		// Best-effort leave when the tab closes; refresh within the grace period keeps the seat anyway.
+		window.addEventListener('pagehide', (ev) => {
+			if (!ev.persisted) this.conn.close();
+		});
+	}
+}
+
 document.addEventListener('DOMContentLoaded', () => {
-    new GameClient();
+	window.wutizzit = new GameClient();
 });

@@ -1,123 +1,76 @@
-import { DurableObject } from "cloudflare:workers";
+import { DurableObject } from 'cloudflare:workers';
 
 interface RoomInfo {
-  id: string;
-  playerCount: number;
-  gameStarted: boolean;
-  lastUpdated: number;
+	id: string;
+	playerCount: number;
+	inGame: boolean;
+	updatedAt: number;
 }
 
-export class GlobalStatsObject extends DurableObject {
-  private activeRooms: Map<string, RoomInfo> = new Map();
-  
-  constructor(ctx: DurableObjectState, env: Env) {
-    super(ctx, env);
-  }
+export interface LobbySnapshot {
+	activeGames: number;
+	totalRooms: number;
+	totalPlayers: number;
+	games: { id: string; playerCount: number; inGame: boolean }[];
+}
 
-  async fetch(request: Request): Promise<Response> {
-    const url = new URL(request.url);
-    
-    switch (url.pathname) {
-      case "/register":
-        return this.handleRegisterRoom(request);
-      case "/unregister":
-        return this.handleUnregisterRoom(request);
-      case "/update":
-        return this.handleUpdateRoom(request);
-      case "/stats":
-        return this.handleGetStats();
-      case "/active-games":
-        return this.handleGetActiveGames();
-      default:
-        return new Response("Not found", { status: 404 });
-    }
-  }
+/** Rooms heartbeat every 5 minutes; anything silent for longer than this is gone. */
+const STALE_MS = 12 * 60_000;
+const MAX_LISTED = 20;
+const MAX_PLAYERS = 10;
 
-  private async handleRegisterRoom(request: Request): Promise<Response> {
-    const { roomId, playerCount, gameStarted } = await request.json();
-    
-    this.activeRooms.set(roomId, {
-      id: roomId,
-      playerCount: playerCount || 0,
-      gameStarted: gameStarted || false,
-      lastUpdated: Date.now()
-    });
-    
-    return Response.json({ success: true });
-  }
+/**
+ * A single, tiny directory of live rooms for the home page. Rooms push updates
+ * over RPC only when their player count or phase changes, so load stays low.
+ */
+export class GlobalStatsObject extends DurableObject<Env> {
+	private rooms: Map<string, RoomInfo>;
 
-  private async handleUnregisterRoom(request: Request): Promise<Response> {
-    const { roomId } = await request.json();
-    
-    this.activeRooms.delete(roomId);
-    
-    return Response.json({ success: true });
-  }
+	constructor(ctx: DurableObjectState, env: Env) {
+		super(ctx, env);
+		this.rooms = new Map(ctx.storage.kv.get<[string, RoomInfo][]>('rooms') ?? []);
+	}
 
-  private async handleUpdateRoom(request: Request): Promise<Response> {
-    const { roomId, playerCount, gameStarted } = await request.json();
-    
-    const existing = this.activeRooms.get(roomId);
-    if (existing) {
-      this.activeRooms.set(roomId, {
-        id: roomId,
-        playerCount: playerCount ?? existing.playerCount,
-        gameStarted: gameStarted ?? existing.gameStarted,
-        lastUpdated: Date.now()
-      });
-    } else {
-      // Register if not exists
-      this.activeRooms.set(roomId, {
-        id: roomId,
-        playerCount: playerCount || 0,
-        gameStarted: gameStarted || false,
-        lastUpdated: Date.now()
-      });
-    }
-    
-    return Response.json({ success: true });
-  }
+	async report(input: { roomId: string; playerCount: number; inGame: boolean }): Promise<void> {
+		this.rooms.set(input.roomId, {
+			id: input.roomId,
+			playerCount: input.playerCount,
+			inGame: input.inGame,
+			updatedAt: Date.now(),
+		});
+		this.persist();
+	}
 
-  private handleGetStats(): Response {
-    // Clean up stale rooms (older than 5 minutes)
-    const fiveMinutesAgo = Date.now() - (5 * 60 * 1000);
-    for (const [roomId, room] of this.activeRooms) {
-      if (room.lastUpdated < fiveMinutesAgo) {
-        this.activeRooms.delete(roomId);
-      }
-    }
+	async remove(roomId: string): Promise<void> {
+		if (this.rooms.delete(roomId)) this.persist();
+	}
 
-    const activeRooms = Array.from(this.activeRooms.values());
-    const activeGames = activeRooms.filter(room => room.gameStarted).length;
-    const totalRooms = activeRooms.length;
-    const totalPlayers = activeRooms.reduce((sum, room) => sum + room.playerCount, 0);
-    
-    return Response.json({
-      activeGames,
-      totalRooms,
-      totalPlayers,
-      roomsWaiting: totalRooms - activeGames
-    });
-  }
+	async snapshot(): Promise<LobbySnapshot> {
+		const cutoff = Date.now() - STALE_MS;
+		let pruned = false;
+		for (const [id, room] of this.rooms) {
+			if (room.updatedAt < cutoff || room.playerCount <= 0) {
+				this.rooms.delete(id);
+				pruned = true;
+			}
+		}
+		if (pruned) this.persist();
 
-  private handleGetActiveGames(): Response {
-    // Clean up stale rooms
-    const fiveMinutesAgo = Date.now() - (5 * 60 * 1000);
-    for (const [roomId, room] of this.activeRooms) {
-      if (room.lastUpdated < fiveMinutesAgo) {
-        this.activeRooms.delete(roomId);
-      }
-    }
+		const rooms = [...this.rooms.values()];
+		return {
+			activeGames: rooms.filter((r) => r.inGame).length,
+			totalRooms: rooms.length,
+			totalPlayers: rooms.reduce((n, r) => n + r.playerCount, 0),
+			// Joinable rooms first (waiting, then in progress), newest activity first.
+			games: rooms
+				.filter((r) => r.playerCount < MAX_PLAYERS)
+				.sort((a, b) => Number(a.inGame) - Number(b.inGame) || b.updatedAt - a.updatedAt)
+				.slice(0, MAX_LISTED)
+				.map(({ id, playerCount, inGame }) => ({ id, playerCount, inGame })),
+		};
+	}
 
-    const activeGames = Array.from(this.activeRooms.values())
-      .filter(room => room.playerCount > 0)
-      .map(room => ({
-        id: room.id,
-        playerCount: room.playerCount,
-        gameStarted: room.gameStarted,
-        status: room.gameStarted ? 'in-game' : 'waiting'
-      }));
-    
-    return Response.json({ games: activeGames });
-  }
+	private persist() {
+		this.ctx.storage.kv.put('rooms', [...this.rooms]);
+	}
 }

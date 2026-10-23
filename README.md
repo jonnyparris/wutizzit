@@ -33,17 +33,19 @@ A real-time multiplayer drawing and guessing game built with Cloudflare Workers,
 - **Responsive Design**: Works on desktop and mobile devices
 
 ### Technical Features
-- **Real-time Multiplayer**: WebSocket-based communication
-- **Persistent Rooms**: Durable Objects maintain game state
-- **Scalable Architecture**: Built on Cloudflare's edge network
-- **Auto-reconnection**: Handles network interruptions gracefully
+- **Hibernating WebSockets**: Durable Objects sleep between messages, so idle rooms cost nothing
+- **Reconnect-safe**: refresh or drop off Wi-Fi and you keep your seat and score for 30 seconds
+- **Late-join replay**: the drawing is stored in the room's SQLite, so new players see the full picture
+- **Server-authoritative timers**: Durable Object alarms drive rounds; clients just count down locally
+- **Built for the edge**: static assets are served from Cloudflare's cache without invoking the Worker
 
 ## 🚀 Technology Stack
 
-- **Frontend**: Vanilla JavaScript, HTML5 Canvas, Tailwind CSS
-- **Backend**: Cloudflare Workers with Durable Objects
-- **Real-time Communication**: WebSockets
-- **Deployment**: Cloudflare Workers platform
+- **Frontend**: Vanilla JavaScript, HTML5 Canvas (Pointer Events), Tailwind CSS v4 (compiled at build time)
+- **Backend**: Cloudflare Workers, SQLite-backed Durable Objects, Durable Object RPC + alarms
+- **Real-time**: WebSocket Hibernation API with auto-responding keepalive pings
+- **Abuse protection**: Workers Rate Limiting binding on room creation and joins, per-socket token buckets
+- **Hosting**: Workers Static Assets with SPA fallback for `/room/:code` links
 
 ## 🎯 Game Rules
 
@@ -58,35 +60,50 @@ A real-time multiplayer drawing and guessing game built with Cloudflare Workers,
 
 ## 🛠️ Development
 
-### Prerequisites
-- Node.js (v16 or later)
-- Cloudflare account with Workers enabled
-- Wrangler CLI tool
-
-### Local Development
 ```bash
-# Install dependencies
 npm install
-
-# Start development server
-npm run dev
-
-# Deploy to Cloudflare
-npm run deploy
+npm run dev        # wrangler dev (builds Tailwind first). Run `npm run dev:css` alongside to watch CSS.
+npm test           # Vitest inside the Workers runtime (@cloudflare/vitest-plugin)
+npm run typecheck
+npm run deploy     # builds CSS, then wrangler deploy
 ```
+
+Run `npm run cf-typegen` after changing `wrangler.jsonc`.
+
+### Architecture
+
+```
+Browser ──HTTP──▶ Worker (src/index.ts)
+  │                 ├─ POST /rooms            → GameRoom.init()        (rate limited)
+  │                 ├─ POST /rooms/:code/join → GameRoom.join()        (rate limited, returns secret token)
+  │                 ├─ GET  /rooms/:code      → GameRoom.summary()
+  │                 └─ GET  /api/lobby        → GlobalStats.snapshot() (edge-cached 3s)
+  └──WebSocket──▶ /rooms/:code/ws?token=…  → GameRoom (hibernating)
+                     state:  ctx.storage.kv   (sync KV API)
+                     canvas: ctx.storage.sql  (ops table, replayed on join)
+                     timers: one alarm for round deadlines, hints, reconnect grace, idle cleanup
+```
+
+- Each player has a public `id` (shared with everyone) and a secret `token` (only theirs). All game
+  actions (`start`, `choose`, `draw`, `chat`, `pause`, `kick`, `leave`) go over the socket, so they
+  are tied to an authenticated connection.
+- The server sends each player a personalised `state` snapshot: the drawer sees the word and word
+  choices, guessers see only the masked hint. Correct guesses are never echoed to other players.
+- Drawing is sent as batched ops (`line` with many points, `fill`, `undo`, `clear`), one message
+  per animation frame. Every client keeps the same op log, so undo and late joins render identically.
+- Empty rooms delete their storage after 10 minutes.
 
 ### Project Structure
 ```
 ├── src/
-│   ├── durable-objects/     # Game room logic
-│   ├── handlers/            # HTTP request handlers
-│   ├── types/              # TypeScript type definitions
-│   └── utils/              # Utility functions and word lists
-├── public/                 # Static frontend files
-│   ├── index.html          # Main game interface
-│   ├── game.js            # Client-side game logic
-│   └── styles.css         # Additional styles
-└── wrangler.toml          # Cloudflare Workers configuration
+│   ├── index.ts               # Worker router
+│   ├── durable-objects/       # GameRoom (game logic) and GlobalStats (home page directory)
+│   ├── game/logic.ts          # Pure helpers: matching, hints, scoring, validation
+│   ├── client/styles.css      # Tailwind source → public/styles.css
+│   └── utils/                 # IDs, word list
+├── public/                    # index.html, game.js, _headers (CSP and security headers)
+├── test/                      # Vitest (unit + Durable Object integration)
+└── wrangler.jsonc
 ```
 
 ## 🎨 Game Features in Detail
@@ -95,13 +112,13 @@ npm run deploy
 - **Brush Sizes**: Multiple brush sizes for different drawing styles
 - **Color Palette**: Full spectrum of colors available
 - **Fill Tool**: Quickly fill areas with selected color
-- **Undo/Clear**: Undo last action or clear entire canvas
+- **Undo/Clear**: Undo the last stroke (Ctrl/Cmd+Z) or clear the canvas
 
 ### Room Management
-- **Room Codes**: Simple 6-character room codes for easy sharing
+- **Room Codes**: 6-character codes without look-alike characters, plus shareable `/room/CODE` links
 - **Owner Controls**: Room creator can start games and manage players
 - **Auto-ownership Transfer**: If room owner leaves, ownership transfers automatically
-- **Player Moderation**: Ban disruptive players from the room
+- **Player Moderation**: Remove disruptive players; they can't rejoin that room
 
 ### Word System
 - **Diverse Word List**: 200+ words including popular culture references
@@ -111,12 +128,8 @@ npm run deploy
 
 ## 🌐 Deployment
 
-The game is deployed on Cloudflare Workers and can be accessed at your configured domain.
-
-### Environment Setup
-1. Configure your Cloudflare account ID in `wrangler.toml`
-2. Set up any necessary environment variables
-3. Deploy with `npm run deploy`
+`npm run deploy`. No secrets or extra resources are needed: Durable Objects and rate limiters are
+declared in `wrangler.jsonc`.
 
 ## 🤝 Contributing
 

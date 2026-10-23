@@ -8,8 +8,11 @@
 - Wants room creators to have control over game settings
 
 ## Technical Patterns
-- Use CORS headers carefully - some responses (WebSocket upgrades) have immutable headers
-- Always add try-catch around header modifications
+- Same-origin app: no CORS. Security headers for HTML live in `public/_headers`
+- Never use innerHTML with user data in game.js; use the `h()` helper (textContent)
+- Durable Objects use the Hibernation API: no setInterval/setTimeout for game timing, use the alarm via `commit()`
+- Persist room state with `commit()` after every mutation; in-memory fields are lost on hibernation
+- Never send `token` or the current word to players who shouldn't have it; add a test when touching `viewState`
 - Player lists should be sorted by score (descending) with visual indicators for leaders
 - Chat messages should have visual styling and animations
 - Use consistent avatar generation based on player ID for persistence
@@ -30,7 +33,7 @@
 - Auto-rotate drawer role between rounds
 
 ## Code Organization
-- Keep Durable Objects for stateful game logic
-- Separate handlers for different API endpoints  
-- Real-time updates via WebSocket broadcasting
+- Keep Durable Objects for stateful game logic; Worker → DO calls use RPC, only the WebSocket upgrade uses fetch
+- All in-game actions go over the WebSocket; HTTP is only create/join/summary/lobby
+- Pure logic goes in `src/game/logic.ts` with unit tests
 - Error handling with user-friendly messages

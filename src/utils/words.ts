@@ -1,3 +1,6 @@
+import { normalizeGuess } from '../game/logic';
+import { pickRandom } from './id';
+
 export const WORDS = [
   // Basic words
   'cat', 'dog', 'house', 'tree', 'car', 'sun', 'moon', 'star', 'fish', 'bird',
@@ -81,33 +84,22 @@ export const WORDS = [
   'flying', 'swimming', 'climbing', 'cooking', 'reading'
 ];
 
-// Get a daily rotating subset of 100 words
-export function getDailyWords(): string[] {
-  // Get day of year as seed (changes every day)
-  const now = new Date();
-  const start = new Date(now.getFullYear(), 0, 0);
-  const diff = now.getTime() - start.getTime();
-  const dayOfYear = Math.floor(diff / (1000 * 60 * 60 * 24));
-  
-  // Use day as seed for deterministic "random" selection
-  const seed = dayOfYear;
-  const shuffledWords = [...WORDS];
-  
-  // Simple deterministic shuffle based on day
-  for (let i = shuffledWords.length - 1; i > 0; i--) {
-    const j = ((seed + i) * 9301 + 49297) % (i + 1);
-    [shuffledWords[i], shuffledWords[j]] = [shuffledWords[j], shuffledWords[i]];
-  }
-  
-  // Return first 100 words for today
-  return shuffledWords.slice(0, Math.min(100, shuffledWords.length));
-}
 
-export function getRandomWord(): string {
-  const dailyWords = getDailyWords();
-  return dailyWords[Math.floor(Math.random() * dailyWords.length)];
-}
-
-export function isWordMatch(guess: string, word: string): boolean {
-  return guess.toLowerCase().trim() === word.toLowerCase().trim();
+/**
+ * Pick `count` distinct words from `pool`, avoiding ones already used this game.
+ * When the pool runs dry the used set is reset so games never stall.
+ */
+export function pickWords(pool: readonly string[], used: Set<string>, count: number): string[] {
+	let available = pool.filter((w) => !used.has(normalizeGuess(w)));
+	if (available.length < count) {
+		used.clear();
+		available = [...pool];
+	}
+	const picks: string[] = [];
+	while (picks.length < count && available.length > 0) {
+		const word = pickRandom(available);
+		available = available.filter((w) => w !== word);
+		picks.push(word);
+	}
+	return picks;
 }

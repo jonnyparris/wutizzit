@@ -1,73 +1,46 @@
-/**
- * For more details on how to configure Wrangler, refer to:
- * https://developers.cloudflare.com/workers/wrangler/configuration/
- */
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "wutizzit",
 	"main": "src/index.ts",
-	"compatibility_date": "2025-08-31",
-	"migrations": [
-		{
-			"new_sqlite_classes": [
-				"GameRoomObject"
-			],
-			"tag": "v1"
-		},
-		{
-			"new_sqlite_classes": [
-				"GlobalStatsObject"
-			],
-			"tag": "v2"
-		}
-	],
-	"assets": {
-		// The path to the directory containing the `index.html` file to be served at `/`
-		"directory": "./public"
+	"compatibility_date": "2026-10-01",
+	"upload_source_maps": true,
+	"observability": {
+		"enabled": true,
+		"head_sampling_rate": 1
 	},
+
+	// Tailwind is compiled at build time (not via the Play CDN at runtime).
+	// `wrangler dev` and `wrangler deploy` both run this first.
+	"build": {
+		"command": "npm run build:css",
+		"watch_dir": ["src", "public/game.js", "public/index.html"]
+	},
+
+	"assets": {
+		"directory": "./public",
+		"binding": "ASSETS",
+		// `/room/ABC123` deep links fall back to index.html.
+		"not_found_handling": "single-page-application",
+		// Only API and WebSocket routes run the Worker. Everything else is served
+		// straight from the asset cache without invoking the Worker.
+		"run_worker_first": ["/rooms", "/rooms/*", "/api/*"]
+	},
+
 	"durable_objects": {
 		"bindings": [
-			{
-				"class_name": "GameRoomObject",
-				"name": "GAME_ROOM"
-			},
-			{
-				"class_name": "GlobalStatsObject",
-				"name": "GLOBAL_STATS"
-			}
+			{ "class_name": "GameRoomObject", "name": "GAME_ROOM" },
+			{ "class_name": "GlobalStatsObject", "name": "GLOBAL_STATS" }
 		]
 	},
-	"observability": {
-		"enabled": true
-	}
-	/**
-	 * Smart Placement
-	 * Docs: https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement
-	 */
-	// "placement": { "mode": "smart" }
-	/**
-	 * Bindings
-	 * Bindings allow your Worker to interact with resources on the Cloudflare Developer Platform, including
-	 * databases, object storage, AI inference, real-time communication and more.
-	 * https://developers.cloudflare.com/workers/runtime-apis/bindings/
-	 */
-	/**
-	 * Environment Variables
-	 * https://developers.cloudflare.com/workers/wrangler/configuration/#environment-variables
-	 */
-	// "vars": { "MY_VARIABLE": "production_value" }
-	/**
-	 * Note: Use secrets to store sensitive data.
-	 * https://developers.cloudflare.com/workers/configuration/secrets/
-	 */
-	/**
-	 * Static Assets
-	 * https://developers.cloudflare.com/workers/static-assets/binding/
-	 */
-	// "assets": { "directory": "./public/", "binding": "ASSETS" }
-	/**
-	 * Service Bindings (communicate between multiple Workers)
-	 * https://developers.cloudflare.com/workers/wrangler/configuration/#service-bindings
-	 */
-	// "services": [{ "binding": "MY_SERVICE", "service": "my-service" }]
+	"migrations": [
+		{ "tag": "v1", "new_sqlite_classes": ["GameRoomObject"] },
+		{ "tag": "v2", "new_sqlite_classes": ["GlobalStatsObject"] }
+	],
+
+	// Workers Rate Limiting binding: cheap, per-colo abuse protection on room
+	// creation and joins. Keyed by client IP in src/index.ts.
+	"ratelimits": [
+		{ "name": "CREATE_LIMITER", "namespace_id": "4101", "simple": { "limit": 10, "period": 60 } },
+		{ "name": "JOIN_LIMITER", "namespace_id": "4102", "simple": { "limit": 30, "period": 60 } }
+	]
 }
