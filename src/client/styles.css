@@ -693,6 +693,57 @@
 		background: var(--color-success-soft);
 		color: var(--color-success);
 	}
+	.tag-bot {
+		background: #eef2ff;
+		color: #4338ca;
+	}
+	.tag-thinking {
+		background: #fef9c3;
+		color: #854d0e;
+		animation: blink 1.2s ease-in-out infinite;
+	}
+	/* Bot and agent avatars: an icon on a soft tile instead of initials. */
+	.avatar.avatar-ai {
+		border-radius: 0.6rem;
+	}
+	.avatar.avatar-ai svg {
+		width: 1.1rem;
+		height: 1.1rem;
+	}
+	/* Teams: a coloured edge on each player, and a score bar over the list. */
+	.player.team-A {
+		box-shadow: inset 3px 0 0 #6d4dff;
+	}
+	.player.team-B {
+		box-shadow: inset 3px 0 0 #ff6b6b;
+	}
+	.team-bar {
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+		gap: 0.5rem;
+		padding: 0.625rem 0.75rem 0;
+	}
+	.team-score {
+		display: flex;
+		align-items: baseline;
+		justify-content: space-between;
+		padding: 0.5rem 0.75rem;
+		border-radius: 0.625rem;
+		font-size: 0.8125rem;
+		font-weight: 600;
+	}
+	.team-score b {
+		font-size: 1.125rem;
+		font-variant-numeric: tabular-nums;
+	}
+	.team-score.team-A {
+		background: #f0ecff;
+		color: #4c32cc;
+	}
+	.team-score.team-B {
+		background: #ffeeee;
+		color: #c53030;
+	}
 	.kick-btn {
 		display: grid;
 		place-items: center;

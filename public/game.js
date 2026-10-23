@@ -64,6 +64,8 @@ const CANVAS_H = 500;
 const COLORS = ['#18181b', '#ffffff', '#9ca3af', '#ef4444', '#f97316', '#facc15', '#22c55e', '#14b8a6', '#3b82f6', '#6d4dff', '#ec4899', '#92400e'];
 const AVATAR_COLORS = ['#6d4dff', '#ef4444', '#f97316', '#eab308', '#22c55e', '#14b8a6', '#3b82f6', '#ec4899', '#8b5cf6', '#0ea5e9'];
 const TOTAL_MS = { choosing: 15_000, intermission: 5_000 };
+const AGENT_SHAPES_HELP =
+	'Canvas 800x500 (x right, y down). Shapes: {"type":"line","points":[[x,y],...],"color":"black","width":6}, {"type":"polygon","points":[...],"fill":"red"}, {"type":"circle","cx":400,"cy":250,"r":80,"fill":"yellow"}, {"type":"ellipse","cx","cy","rx","ry"}, {"type":"rect","x","y","w","h","fill"}, {"type":"fill","x","y","color"}. Colors: black, white, gray, red, orange, yellow, green, teal, blue, purple, pink, brown or #rrggbb.';
 
 function hashOf(id) {
 	let hash = 0;
@@ -73,6 +75,11 @@ function hashOf(id) {
 
 /** Coloured circle with the player's initials. */
 function avatar(player, cls = 'avatar') {
+	if (player.kind === 'bot' || player.kind === 'agent') {
+		const node = h('span', { class: `${cls} avatar-ai`, 'aria-hidden': 'true' }, icon('bot', 'icon'));
+		node.style.backgroundColor = player.kind === 'bot' ? '#4338ca' : '#0f766e';
+		return node;
+	}
 	const words = player.username.split(/[\s_-]+|(?=[A-Z][a-z])/).filter(Boolean);
 	const initials = (words.length > 1 ? words[0][0] + words[1][0] : player.username.slice(0, 2)).toUpperCase();
 	const node = h('span', { class: cls, 'aria-hidden': 'true', text: initials });
@@ -248,6 +255,8 @@ class DrawingBoard {
 			this.redraw();
 		} else {
 			this.ops.push(op);
+			// Ops from bots, agents or WebMCP carry their own stroke ids: keep ours ahead of them.
+			if (op.s > this.strokeSeq) this.strokeSeq = op.s;
 			this.render(op);
 		}
 	}
@@ -617,7 +626,14 @@ class GameClient {
 			winnerTitle: $('winner-title'),
 			winnerSubtitle: $('winner-subtitle'),
 			resultsRest: $('results-rest'),
+			mode: $('mode-setting'),
+			teamBar: $('team-bar'),
+			addBotBtn: $('add-bot-btn'),
+			botModal: $('bot-modal'),
+			botModel: $('bot-model'),
+			botNote: $('bot-model-note'),
 		};
+		this.botModels = null;
 
 		this.sound = new Sound($('mute-btn'));
 		this.board = new DrawingBoard($('game-canvas'), {
@@ -633,6 +649,7 @@ class GameClient {
 		});
 
 		this.bindUi();
+		this.registerAgentTools();
 		this.el.username.value = store.get('wutizzit:name') || randomName();
 		this.route();
 		window.addEventListener('popstate', () => this.route());
@@ -764,6 +781,7 @@ class GameClient {
 			this.state = null;
 			this.el.roomId.textContent = roomId;
 			this.el.chat.replaceChildren();
+			this.chatLog = [];
 			if (location.pathname !== `/room/${roomId}`) history.pushState({ roomId }, '', `/room/${roomId}`);
 			document.title = `Room ${roomId} · Wutizzit`;
 			this.showGame();
@@ -849,6 +867,7 @@ class GameClient {
 		switch (msg.type) {
 			case 'welcome':
 				this.el.chat.replaceChildren();
+				this.chatLog = [];
 				for (const m of msg.chat) this.addChat(m, false);
 				this.applyState(msg.state, true);
 				if (msg.state.phase !== 'lobby') this.board.load(msg.ops);
@@ -1025,6 +1044,12 @@ class GameClient {
 	}
 
 	renderPlayers(s) {
+		show(this.el.teamBar, !!s.teams);
+		if (s.teams) {
+			this.el.teamBar.replaceChildren(
+				...[...s.teams].sort((a, b) => a.team.localeCompare(b.team)).map((t) => h('div', { class: `team-score team-${t.team}` }, h('span', { text: t.name }), h('b', { text: t.score }))),
+			);
+		}
 		const sorted = [...s.players].sort((a, b) => b.score - a.score);
 		this.el.playerCount.textContent = `${s.players.length}/10`;
 		// Skip identical rebuilds so a focused kick button keeps focus.
@@ -1040,10 +1065,13 @@ class GameClient {
 				if (p.id === s.ownerId) tags.push(h('span', { class: 'tag', title: 'Host: can start, pause and remove players' }, icon('crown', 'icon icon-xs'), 'Host'));
 				if (p.isDrawer) tags.push(h('span', { class: 'tag tag-accent' }, icon('pencil', 'icon icon-xs'), 'Drawing'));
 				if (p.guessed) tags.push(h('span', { class: 'tag tag-success' }, icon('check', 'icon icon-xs'), 'Guessed'));
+				if (p.kind === 'bot') tags.push(h('span', { class: 'tag tag-bot', title: p.model ?? 'AI bot' }, icon('bot', 'icon icon-xs'), 'Bot'));
+				if (p.kind === 'agent') tags.push(h('span', { class: 'tag tag-bot', title: 'An AI agent playing over MCP' }, icon('bot', 'icon icon-xs'), 'Agent'));
+				if (p.thinking) tags.push(h('span', { class: 'tag tag-thinking', text: 'Thinking…' }));
 				if (!p.connected) tags.push(h('span', { class: 'tag', text: 'Reconnecting' }));
 				return h(
 					'li',
-					{ class: `player ${isMe ? 'me' : ''} ${p.isDrawer ? 'drawing' : ''} ${p.connected ? '' : 'offline'}` },
+					{ class: `player ${isMe ? 'me' : ''} ${p.isDrawer ? 'drawing' : ''} ${p.connected ? '' : 'offline'} ${p.team ? `team-${p.team}` : ''}`, title: p.team ? (p.team === 'A' ? 'Team Violet' : 'Team Coral') : null },
 					h('span', { class: `rank ${top > 0 && p.score === top ? 'leader' : ''}` }, String(i + 1), top > 0 && p.score === top ? h('span', { class: 'sr-only', text: ', in the lead' }) : null),
 					avatar(p),
 					h('div', { class: 'min-w-0 flex-1' }, h('div', { class: 'truncate text-sm font-semibold', title: p.username, text: p.username }), tags.length ? h('div', { class: 'mt-0.5 flex flex-wrap gap-1' }, tags) : null),
@@ -1089,6 +1117,8 @@ class GameClient {
 
 	addChat(m, live) {
 		const s = this.state;
+		(this.chatLog ??= []).push(m);
+		if (this.chatLog.length > 40) this.chatLog.shift();
 		let node;
 		if (m.kind === 'system') node = h('div', { class: 'msg msg-system', text: m.text });
 		else if (m.kind === 'correct') node = h('div', { class: 'msg msg-correct' }, icon('check'), h('span', { text: m.text }));
@@ -1107,6 +1137,156 @@ class GameClient {
 		if (live && m.kind === 'chat' && m.playerId === s?.you.id && s?.phase === 'drawing' && !s.round?.guessed && s.round?.drawerId !== s.you.id) this.sound.play('wrong');
 	}
 
+	// --- Agent tools (WebMCP) ---------------------------------------------
+	//
+	// Browser agents (Chrome's navigator.modelContext, or anything driving the page) play as this
+	// tab's player with these tools. The same functions are on window.wutizzit.agent for scripts.
+
+	agentState() {
+		const s = this.state;
+		if (!s) return { screen: this.roomId ? 'connecting' : 'home', next: 'Call create_room or join_room.' };
+		const round = s.round;
+		const role = !round ? 'none' : round.drawerId === s.you.id ? 'drawer' : 'guesser';
+		let next = 'Wait, then call get_state again.';
+		if (s.phase === 'lobby') next = s.you.isOwner ? 'You are the host: add_bot or invite people, then start_game.' : 'Waiting for the host to start.';
+		else if (s.phase === 'choosing' && role === 'drawer') next = 'Pick a word with choose_word.';
+		else if (s.phase === 'drawing' && role === 'drawer') next = `Draw "${round.word}" with draw. Never write letters.`;
+		else if (s.phase === 'drawing' && !round.guessed) next = `Call view_canvas, then guess. Pattern: ${round.hint}`;
+		return {
+			screen: 'game',
+			room: s.roomId,
+			link: `${location.origin}/room/${s.roomId}`,
+			phase: s.phase,
+			paused: s.paused,
+			round: s.roundNumber ? `${s.roundNumber}/${s.maxRounds}` : null,
+			timeLeftSeconds: s.remaining == null ? null : Math.round(s.remaining / 1000),
+			you: { name: s.players.find((p) => p.id === s.you.id)?.username, isHost: s.you.isOwner },
+			role,
+			word: round?.word ?? null,
+			choices: round?.choices ?? null,
+			hint: round?.hint ?? null,
+			youGuessed: !!round?.guessed,
+			players: s.players.map((p) => ({ name: p.username, kind: p.kind, score: p.score, team: p.team, drawing: p.isDrawer, guessed: p.guessed })),
+			teams: s.teams,
+			chat: (this.chatLog ?? []).slice(-15).map((m) => ({ from: m.username ?? m.kind, text: m.text })),
+			next,
+		};
+	}
+
+	registerAgentTools() {
+		const ok = (value) => ({ content: [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value) }] });
+		const inGame = () => {
+			if (!this.state) throw new Error('Not in a room yet. Call create_room or join_room first.');
+		};
+		const tools = [
+			{
+				name: 'get_state',
+				description: 'Wutizzit drawing game: current phase, your role, the word (if you draw), the hint, players, recent chat and a "next" suggestion.',
+				inputSchema: { type: 'object', properties: {} },
+				annotations: { readOnlyHint: true },
+				execute: async () => ok(this.agentState()),
+			},
+			{
+				name: 'create_room',
+				description: 'Create a new Wutizzit room and join it as host.',
+				inputSchema: { type: 'object', properties: { name: { type: 'string', description: 'Display name' } } },
+				execute: async ({ name }) => {
+					if (name) this.el.username.value = String(name).slice(0, 20);
+					await this.createRoom();
+					return ok(this.agentState());
+				},
+			},
+			{
+				name: 'join_room',
+				description: 'Join a Wutizzit room by its 6-character code.',
+				inputSchema: { type: 'object', properties: { code: { type: 'string' }, name: { type: 'string' } }, required: ['code'] },
+				execute: async ({ code, name }) => {
+					if (name) this.el.username.value = String(name).slice(0, 20);
+					await this.join(String(code).trim().toUpperCase());
+					return ok(this.agentState());
+				},
+			},
+			{
+				name: 'view_canvas',
+				description: 'See the current drawing as a PNG image.',
+				inputSchema: { type: 'object', properties: {} },
+				annotations: { readOnlyHint: true },
+				execute: async () => {
+					inGame();
+					const url = this.board.canvas.toDataURL('image/png');
+					return { content: [{ type: 'image', data: url.split(',')[1], mimeType: 'image/png' }] };
+				},
+			},
+			{
+				name: 'guess',
+				description: 'Guess the word, or chat. Near misses are only shown to you.',
+				inputSchema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] },
+				execute: async ({ text }) => {
+					inGame();
+					this.conn.send({ type: 'chat', text: String(text).slice(0, 100) });
+					return ok('sent');
+				},
+			},
+			{
+				name: 'choose_word',
+				description: 'On your turn, pick one of the offered words by index (see get_state choices).',
+				inputSchema: { type: 'object', properties: { index: { type: 'integer', minimum: 0, maximum: 4 } }, required: ['index'] },
+				execute: async ({ index }) => {
+					inGame();
+					this.conn.send({ type: 'choose', index: Number(index) });
+					return ok('chosen');
+				},
+			},
+			{
+				name: 'draw',
+				description: `Draw shapes on your turn; they are replayed gradually for everyone. ${AGENT_SHAPES_HELP}`,
+				inputSchema: { type: 'object', properties: { shapes: { type: 'array', items: { type: 'object' } } }, required: ['shapes'] },
+				execute: async ({ shapes }) => {
+					inGame();
+					this.conn.send({ type: 'shapes', shapes });
+					return ok('drawing');
+				},
+			},
+			{
+				name: 'add_bot',
+				description: 'Host only: add an AI bot player. Optional model id (see /api/bot-models).',
+				inputSchema: { type: 'object', properties: { model: { type: 'string' } } },
+				execute: async ({ model }) => {
+					inGame();
+					const { default: def } = await this.loadBotModels();
+					this.conn.send({ type: 'add-bot', model: model || def });
+					return ok('bot requested');
+				},
+			},
+			{
+				name: 'start_game',
+				description: 'Host only: start the game with the settings in the lobby bar. Optional mode: ffa, teams or humans-vs-ai.',
+				inputSchema: { type: 'object', properties: { mode: { type: 'string', enum: ['ffa', 'teams', 'humans-vs-ai'] } } },
+				execute: async ({ mode }) => {
+					inGame();
+					if (mode) this.el.mode.value = mode === 'ffa' ? 'ffa' : mode === 'teams' ? 'teams:mixed' : 'teams:humans-vs-ai';
+					this.startGame();
+					return ok('start requested');
+				},
+			},
+		];
+
+		// Plain JS API for scripts (Playwright, Browser Run): window.wutizzit.agent.<tool>(args).
+		this.agent = Object.fromEntries(tools.map((t) => [t.name, (args = {}) => t.execute(args)]));
+		this.agent.tools = tools.map(({ name, description, inputSchema }) => ({ name, description, inputSchema }));
+
+		const mc = navigator.modelContext;
+		if (!mc) return;
+		for (const tool of tools) {
+			try {
+				if (typeof mc.registerTool === 'function') mc.registerTool(tool);
+			} catch (err) {
+				console.warn('WebMCP registerTool failed', tool.name, err);
+			}
+		}
+		if (typeof mc.registerTool !== 'function' && typeof mc.provideContext === 'function') mc.provideContext({ tools });
+	}
+
 	// --- Actions -----------------------------------------------------------
 
 	sendChat() {
@@ -1122,13 +1302,50 @@ class GameClient {
 				maxRounds: Number(this.el.rounds.value),
 				roundDuration: Number(this.el.duration.value),
 				wordChoiceCount: Number(this.el.choices.value),
+				mode: this.el.mode.value.startsWith('teams') ? 'teams' : 'ffa',
+				teamSplit: this.el.mode.value.split(':')[1] ?? 'mixed',
 			},
 			words: this.customWords,
 		});
 	}
 
 	kick(player) {
-		if (confirm(`Remove ${player.username} from the room? Nobody on their network can rejoin for 10 minutes.`)) this.conn.send({ type: 'kick', playerId: player.id });
+		const msg = player.kind === 'bot' ? `Remove ${player.username}?` : `Remove ${player.username} from the room? Nobody on their network can rejoin for 10 minutes.`;
+		if (confirm(msg)) this.conn.send({ type: 'kick', playerId: player.id });
+	}
+
+	async loadBotModels() {
+		if (this.botModels) return this.botModels;
+		try {
+			this.botModels = await (await fetch('/api/bot-models')).json();
+		} catch {
+			this.botModels = { default: null, models: [] };
+		}
+		return this.botModels;
+	}
+
+	async openAddBot() {
+		const { models, default: def } = await this.loadBotModels();
+		const sel = this.el.botModel;
+		if (!sel.options.length) {
+			const group = (label, list) => (list.length ? h('optgroup', { label }, list.map((m) => h('option', { value: m.id, text: m.label }))) : null);
+			sel.replaceChildren(...[group('Workers AI', models.filter((m) => !m.paid)), group('Via AI Gateway', models.filter((m) => m.paid))].filter(Boolean));
+			sel.value = store.get('wutizzit:bot-model') || def;
+			const note = () => {
+				const m = models.find((x) => x.id === sel.value);
+				this.el.botNote.textContent = m?.paid ? 'Runs through AI Gateway. Third-party models share a daily budget.' : 'Runs on Workers AI. Sees with this model, draws with gpt-oss-120b.';
+			};
+			sel.addEventListener('change', note);
+			note();
+		}
+		this.el.botModal.returnValue = '';
+		this.el.botModal.showModal();
+	}
+
+	onBotModalClosed() {
+		if (this.el.botModal.returnValue !== 'add') return;
+		store.set('wutizzit:bot-model', this.el.botModel.value);
+		this.conn.send({ type: 'add-bot', model: this.el.botModel.value });
 	}
 
 	async shareLink(button = this.el.copyBtn) {
@@ -1194,8 +1411,16 @@ class GameClient {
 		const me = this.state?.you.id;
 		const players = new Map((this.state?.players ?? []).map((p) => [p.id, p]));
 		const winner = top[0];
-		this.el.winnerTitle.textContent = results.reason ? 'Game over' : winner?.id === me ? 'You won!' : `${winner?.username ?? 'Someone'} wins`;
-		this.el.winnerSubtitle.textContent = results.reason ? `${results.reason}.` : winner ? `${winner.score} points. Well played, everyone.` : '';
+		const teams = results.teams;
+		if (teams && !results.reason) {
+			const draw = teams[0].score === teams[1].score;
+			const myTeam = players.get(me)?.team;
+			this.el.winnerTitle.textContent = draw ? "It's a draw" : teams[0].team === myTeam ? 'Your team won!' : `${teams[0].name} wins`;
+			this.el.winnerSubtitle.textContent = teams.map((t) => `${t.name} ${t.score}`).join(' · ');
+		} else {
+			this.el.winnerTitle.textContent = results.reason ? 'Game over' : winner?.id === me ? 'You won!' : `${winner?.username ?? 'Someone'} wins`;
+			this.el.winnerSubtitle.textContent = results.reason ? `${results.reason}.` : winner ? `${winner.score} points. Well played, everyone.` : '';
+		}
 		[1, 2, 3].forEach((place) => {
 			const slot = $(`podium-${place}`);
 			const p = top[place - 1];
@@ -1289,6 +1514,8 @@ class GameClient {
 		e.wordsBtn.addEventListener('click', () => this.openWords());
 		e.wordsText.addEventListener('input', () => this.updateWordCount());
 		e.wordsModal.addEventListener('close', () => this.onWordsClosed());
+		e.addBotBtn.addEventListener('click', () => this.openAddBot());
+		e.botModal.addEventListener('close', () => this.onBotModalClosed());
 
 		// Drawing tools
 		e.swatches.replaceChildren(
