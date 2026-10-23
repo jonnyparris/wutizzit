@@ -131,7 +131,7 @@ class Sound {
 	render() {
 		this.button.replaceChildren(icon(this.muted ? 'volume-off' : 'volume', 'icon'));
 		this.button.setAttribute('aria-pressed', String(this.muted));
-		this.button.setAttribute('aria-label', this.muted ? 'Unmute sounds' : 'Mute sounds');
+		this.button.setAttribute('aria-label', 'Mute sounds');
 	}
 
 	tone(freq, ms = 200, delay = 0, type = 'sine') {
@@ -689,6 +689,10 @@ class GameClient {
 			const data = await res.json();
 			this.el.activeGames.textContent = data.activeGames ?? 0;
 			this.el.totalPlayers.textContent = data.totalPlayers ?? 0;
+			// Don't rebuild (and steal keyboard focus) when nothing changed.
+			const key = JSON.stringify(data.games);
+			if (key === this.lobbyKey) return;
+			this.lobbyKey = key;
 			this.el.games.replaceChildren(
 				...data.games.map((g) =>
 					h(
@@ -788,6 +792,7 @@ class GameClient {
 		this.board.setEnabled(false);
 		this.board.clearLocal();
 		this.hideOverlay();
+		this.playersKey = null;
 		this.el.roomInput.value = '';
 		this.el.joinBtn.textContent = 'Join';
 		this.el.joinBtn.className = 'btn btn-secondary px-5';
@@ -912,8 +917,9 @@ class GameClient {
 	renderHeader(s, isDrawer) {
 		const drawer = s.players.find((p) => p.id === s.round?.drawerId);
 		const name = drawer?.username ?? 'Someone';
+		const ready = s.players.filter((p) => p.connected).length;
 		const lines = {
-			lobby: s.players.length < 2 ? 'Waiting for players' : s.you.isOwner ? 'Ready when you are' : 'Waiting for the owner to start',
+			lobby: ready < 2 ? 'Waiting for players' : s.you.isOwner ? 'Ready when you are' : 'Waiting for the owner to start',
 			choosing: isDrawer ? 'Pick a word to draw' : `${name} is picking a word`,
 			drawing: isDrawer ? 'Your turn to draw' : s.round?.guessed ? 'You got it. Nice one.' : `Guess what ${name} is drawing`,
 			intermission: 'Round over',
@@ -944,7 +950,8 @@ class GameClient {
 		const words = round.hint.split(/\s+/).filter(Boolean).length;
 		const label = `${letters} letters${words > 1 ? `, ${words} words` : ''}`;
 		this.el.letterCount.textContent = label;
-		this.el.wordHint.setAttribute('aria-label', `Hint: ${round.hint.replace(/_/g, 'blank ')} (${label})`);
+		// The slots are aria-hidden; screen readers get this instead.
+		this.el.letterCount.append(h('span', { class: 'sr-only', text: `. Hint: ${round.hint.replace(/_/g, ' blank ')}` }));
 	}
 
 	card(...children) {
@@ -962,7 +969,7 @@ class GameClient {
 				this.card(
 					h('p', { class: 'overlay-kicker', text: enough ? 'Lobby' : 'Waiting for players' }),
 					h('p', { class: 'text-lg font-bold', text: enough ? (s.you.isOwner ? 'Start the game when everyone is in' : 'The owner will start the game soon') : 'Invite at least one friend to play' }),
-					h('button', { class: 'btn btn-secondary', onclick: () => this.shareLink() }, icon('link'), 'Copy invite link'),
+					h('button', { class: 'btn btn-secondary', onclick: (ev) => this.shareLink(ev.currentTarget) }, icon('link'), h('span', { text: 'Copy invite link' })),
 				),
 			);
 		}
@@ -979,7 +986,7 @@ class GameClient {
 		if (s.phase === 'choosing') {
 			const drawer = s.players.find((p) => p.id === round?.drawerId);
 			return this.showOverlay(
-				this.card(drawer ? avatar(drawer, 'podium-avatar') : null, h('p', { class: 'text-lg font-bold', text: `${drawer?.username ?? 'Someone'} is picking a word` }), h('p', { class: 'text-sm text-muted', text: 'Get ready to guess.' })),
+				this.card(drawer ? avatar(drawer, 'avatar avatar-lg') : null, h('p', { class: 'text-lg font-bold', text: `${drawer?.username ?? 'Someone'} is picking a word` }), h('p', { class: 'text-sm text-muted', text: 'Get ready to guess.' })),
 			);
 		}
 		if (s.phase === 'intermission' && !s.lastRound) {
@@ -1020,19 +1027,24 @@ class GameClient {
 	renderPlayers(s) {
 		const sorted = [...s.players].sort((a, b) => b.score - a.score);
 		this.el.playerCount.textContent = `${s.players.length}/10`;
+		// Skip identical rebuilds so a focused kick button keeps focus.
+		const key = JSON.stringify([sorted, s.you, s.ownerId]);
+		if (key === this.playersKey) return;
+		this.playersKey = key;
+		const top = sorted[0]?.score ?? 0;
 		this.el.players.replaceChildren(
 			...sorted.map((p, i) => {
 				const isMe = p.id === s.you.id;
 				const tags = [];
 				if (isMe) tags.push(h('span', { class: 'tag', text: 'You' }));
-				if (p.id === s.ownerId) tags.push(h('span', { class: 'tag', title: 'Room owner' }, icon('crown', 'icon icon-xs'), 'Host'));
+				if (p.id === s.ownerId) tags.push(h('span', { class: 'tag', title: 'Host: can start, pause and remove players' }, icon('crown', 'icon icon-xs'), 'Host'));
 				if (p.isDrawer) tags.push(h('span', { class: 'tag tag-accent' }, icon('pencil', 'icon icon-xs'), 'Drawing'));
 				if (p.guessed) tags.push(h('span', { class: 'tag tag-success' }, icon('check', 'icon icon-xs'), 'Guessed'));
 				if (!p.connected) tags.push(h('span', { class: 'tag', text: 'Reconnecting' }));
 				return h(
 					'li',
 					{ class: `player ${isMe ? 'me' : ''} ${p.isDrawer ? 'drawing' : ''} ${p.connected ? '' : 'offline'}` },
-					h('span', { class: 'rank', text: i + 1 }),
+					h('span', { class: `rank ${top > 0 && p.score === top ? 'leader' : ''}` }, String(i + 1), top > 0 && p.score === top ? h('span', { class: 'sr-only', text: ', in the lead' }) : null),
 					avatar(p),
 					h('div', { class: 'min-w-0 flex-1' }, h('div', { class: 'truncate text-sm font-semibold', title: p.username, text: p.username }), tags.length ? h('div', { class: 'mt-0.5 flex flex-wrap gap-1' }, tags) : null),
 					h('span', { class: 'text-sm font-bold tabular-nums', text: p.score }),
@@ -1119,9 +1131,10 @@ class GameClient {
 		if (confirm(`Remove ${player.username} from the room? Nobody on their network can rejoin for 10 minutes.`)) this.conn.send({ type: 'kick', playerId: player.id });
 	}
 
-	async shareLink() {
+	async shareLink(button = this.el.copyBtn) {
 		const url = `${location.origin}/room/${this.roomId}`;
-		const label = this.el.copyBtn.querySelector('span');
+		const label = button.querySelector('span');
+		button.dataset.label ??= label.textContent;
 		if (navigator.share && matchMedia('(pointer: coarse)').matches) {
 			try {
 				await navigator.share({ title: 'Join my Wutizzit game', text: `Come draw with me in room ${this.roomId}`, url });
@@ -1133,7 +1146,8 @@ class GameClient {
 		try {
 			await navigator.clipboard.writeText(url);
 			label.textContent = 'Link copied';
-			setTimeout(() => (label.textContent = 'Invite'), 2000);
+			clearTimeout(button._flash);
+			button._flash = setTimeout(() => (label.textContent = button.dataset.label), 2000);
 		} catch {
 			prompt('Copy this link:', url);
 		}
@@ -1310,14 +1324,16 @@ class GameClient {
 		});
 		document.addEventListener('keydown', (ev) => {
 			if (!this.board.enabled) return;
+			// Leave typing (and native text undo) alone.
+			const t = ev.target;
+			if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement || t?.isContentEditable) return;
 			if ((ev.metaKey || ev.ctrlKey) && ev.key.toLowerCase() === 'z') {
 				ev.preventDefault();
 				this.board.undo();
 				this.updateUndo();
 				return;
 			}
-			// Single-key tool shortcuts, but never while typing in chat.
-			if (ev.target instanceof HTMLInputElement || ev.target instanceof HTMLTextAreaElement || ev.metaKey || ev.ctrlKey || ev.altKey) return;
+			if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
 			if (ev.key === 'b') this.setTool(false);
 			if (ev.key === 'f') this.setTool(true);
 		});

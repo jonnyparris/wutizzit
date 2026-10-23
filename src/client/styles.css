@@ -388,7 +388,8 @@
 			stroke 0.2s;
 	}
 	.timer.urgent {
-		color: var(--color-coral);
+		/* The coral ring is decorative; the number uses the danger token for AA contrast (~4.8:1). */
+		color: var(--color-danger);
 	}
 	.timer.urgent .timer-ring {
 		stroke: var(--color-coral);
@@ -657,6 +658,15 @@
 		font-weight: 700;
 		color: white;
 		letter-spacing: 0.02em;
+	}
+	.rank.leader {
+		color: var(--color-accent);
+		font-weight: 800;
+	}
+	.avatar-lg {
+		width: 2.75rem;
+		height: 2.75rem;
+		font-size: 0.875rem;
 	}
 	.tag {
 		display: inline-flex;
