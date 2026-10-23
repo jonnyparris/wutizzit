@@ -61,21 +61,35 @@ const session = {
 const CLOSE = { invalidSession: 4001, replaced: 4002, kicked: 4003, roomClosed: 4004, left: 4005 };
 const CANVAS_W = 800;
 const CANVAS_H = 500;
-const COLORS = ['#000000', '#ffffff', '#808080', '#ff0000', '#ffa500', '#ffff00', '#00c000', '#00ffff', '#0000ff', '#800080', '#ffc0cb', '#a0522d'];
-const AVATARS = ['🐱', '🐶', '🐭', '🐹', '🐰', '🦊', '🐻', '🐼', '🐨', '🐯', '🦁', '🐮', '🐷', '🐸', '🐵', '🐔', '🐧', '🐦', '🐤', '🦆', '🦋', '🐛', '🐝', '🐞', '🦄', '🐲', '👽', '🤖', '🎭', '🎪'];
-const CELEBRATION_GIFS = [
-	'https://media.giphy.com/media/26u4cqiYI30juCOGY/giphy.gif',
-	'https://media.giphy.com/media/3oz8xAFtqoOUUrsh7W/giphy.gif',
-	'https://media.giphy.com/media/26u4kr0pRWGkXaDa0/giphy.gif',
-	'https://media.giphy.com/media/l0MYt5jPR6QX5pnqM/giphy.gif',
-	'https://media.giphy.com/media/26tOZ42Mg6pbTUPHW/giphy.gif',
-	'https://media.giphy.com/media/3o6fJ1BM7R2EBRDnxK/giphy.gif',
-];
+const COLORS = ['#18181b', '#ffffff', '#9ca3af', '#ef4444', '#f97316', '#facc15', '#22c55e', '#14b8a6', '#3b82f6', '#6d4dff', '#ec4899', '#92400e'];
+const AVATAR_COLORS = ['#6d4dff', '#ef4444', '#f97316', '#eab308', '#22c55e', '#14b8a6', '#3b82f6', '#ec4899', '#8b5cf6', '#0ea5e9'];
+const TOTAL_MS = { choosing: 15_000, intermission: 5_000 };
 
-function avatarFor(id) {
+function hashOf(id) {
 	let hash = 0;
 	for (let i = 0; i < id.length; i++) hash = (Math.imul(hash, 31) + id.charCodeAt(i)) | 0;
-	return AVATARS[Math.abs(hash) % AVATARS.length];
+	return Math.abs(hash);
+}
+
+/** Coloured circle with the player's initials. */
+function avatar(player, cls = 'avatar') {
+	const words = player.username.split(/[\s_-]+|(?=[A-Z][a-z])/).filter(Boolean);
+	const initials = (words.length > 1 ? words[0][0] + words[1][0] : player.username.slice(0, 2)).toUpperCase();
+	const node = h('span', { class: cls, 'aria-hidden': 'true', text: initials });
+	node.style.backgroundColor = AVATAR_COLORS[hashOf(player.id) % AVATAR_COLORS.length];
+	return node;
+}
+
+/** Inline icon from the SVG sprite in index.html. */
+function icon(name, cls = 'icon icon-sm') {
+	const NS = 'http://www.w3.org/2000/svg';
+	const svg = document.createElementNS(NS, 'svg');
+	svg.setAttribute('class', cls);
+	svg.setAttribute('aria-hidden', 'true');
+	const use = document.createElementNS(NS, 'use');
+	use.setAttribute('href', `#i-${name}`);
+	svg.append(use);
+	return svg;
 }
 
 function randomName() {
@@ -115,7 +129,7 @@ class Sound {
 	}
 
 	render() {
-		this.button.textContent = this.muted ? '🔇' : '🔊';
+		this.button.replaceChildren(icon(this.muted ? 'volume-off' : 'volume', 'icon'));
 		this.button.setAttribute('aria-pressed', String(this.muted));
 		this.button.setAttribute('aria-label', this.muted ? 'Unmute sounds' : 'Mute sounds');
 	}
@@ -179,7 +193,6 @@ class DrawingBoard {
 		this.active = null; // { id, s, points: [], sent: number, op }
 		this.flushScheduled = false;
 		this.lastFlush = 0;
-		this.lobbyArt = false;
 
 		// Fixed 2x backing store on every device, so flood fills land on identical pixels everywhere.
 		// Costs ~6.4 MB of canvas memory on 1x screens; worth it for consistency.
@@ -196,7 +209,6 @@ class DrawingBoard {
 		ctx.globalCompositeOperation = 'source-over';
 		ctx.fillStyle = '#ffffff';
 		ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
-		this.lobbyArt = false;
 	}
 
 	setEnabled(enabled) {
@@ -235,7 +247,6 @@ class DrawingBoard {
 			this.ops = this.ops.filter((o) => o.s !== last);
 			this.redraw();
 		} else {
-			if (this.lobbyArt) this.reset();
 			this.ops.push(op);
 			this.render(op);
 		}
@@ -350,7 +361,6 @@ class DrawingBoard {
 			c.setPointerCapture(e.pointerId);
 			const s = ++this.strokeSeq;
 			this.active = { pointerId: e.pointerId, s, pending: [x, y], last: null };
-			if (this.lobbyArt) this.reset();
 			this.renderLine([x, y], this.color, this.width);
 			this.scheduleFlush();
 		});
@@ -427,33 +437,6 @@ class DrawingBoard {
 		return this.ops.length > 0;
 	}
 
-	drawLobbyArt() {
-		const { ctx } = this;
-		this.reset();
-		const palettes = [['#667eea', '#764ba2'], ['#f093fb', '#f5576c'], ['#4facfe', '#00f2fe'], ['#fa709a', '#fee140'], ['#fdbb2d', '#22c1c3']];
-		const [a, b] = palettes[Math.floor(Math.random() * palettes.length)];
-		const g = ctx.createRadialGradient(CANVAS_W / 2, CANVAS_H / 2, 0, CANVAS_W / 2, CANVAS_H / 2, CANVAS_W / 2);
-		g.addColorStop(0, a);
-		g.addColorStop(1, b);
-		ctx.fillStyle = g;
-		ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
-		ctx.fillStyle = 'rgba(255,255,255,0.12)';
-		for (let i = 0; i < 9; i++) {
-			ctx.beginPath();
-			ctx.arc(Math.random() * CANVAS_W, Math.random() * CANVAS_H, 20 + Math.random() * 60, 0, Math.PI * 2);
-			ctx.fill();
-		}
-		ctx.fillStyle = 'white';
-		ctx.textAlign = 'center';
-		ctx.shadowColor = 'rgba(0,0,0,0.35)';
-		ctx.shadowBlur = 6;
-		ctx.font = 'bold 30px Inter, system-ui, sans-serif';
-		ctx.fillText('Waiting for the game to start…', CANVAS_W / 2, CANVAS_H / 2 - 10);
-		ctx.font = '18px Inter, system-ui, sans-serif';
-		ctx.fillText('🎨 Share the link and get ready to doodle!', CANVAS_W / 2, CANVAS_H / 2 + 26);
-		ctx.shadowBlur = 0;
-		this.lobbyArt = true;
-	}
 }
 
 // ---------------------------------------------------------------------------
@@ -596,6 +579,8 @@ class GameClient {
 			status: $('game-status'),
 			conn: $('connection-status'),
 			timer: $('timer'),
+			timerText: $('timer-text'),
+			timerRing: $('timer-ring'),
 			roundInfo: $('round-info'),
 			wordDisplay: $('word-display'),
 			currentWord: $('current-word'),
@@ -605,6 +590,8 @@ class GameClient {
 			tools: $('drawing-tools'),
 			swatches: $('color-picker-grid'),
 			brush: $('brush-size'),
+			brushPreview: $('brush-preview'),
+			brushBtn: $('brush-tool'),
 			fillBtn: $('fill-tool'),
 			undoBtn: $('undo-canvas'),
 			clearBtn: $('clear-canvas'),
@@ -614,7 +601,7 @@ class GameClient {
 			chat: $('chat-messages'),
 			chatForm: $('chat-form'),
 			chatInput: $('chat-input'),
-			settings: $('game-settings'),
+			ownerBar: $('owner-bar'),
 			rounds: $('rounds-setting'),
 			duration: $('duration-setting'),
 			choices: $('word-choices-setting'),
@@ -628,7 +615,8 @@ class GameClient {
 			wordsCount: $('custom-words-count'),
 			winnerModal: $('winner-modal'),
 			winnerTitle: $('winner-title'),
-			gif: $('celebration-gif'),
+			winnerSubtitle: $('winner-subtitle'),
+			resultsRest: $('results-rest'),
 		};
 
 		this.sound = new Sound($('mute-btn'));
@@ -663,9 +651,10 @@ class GameClient {
 			// Returning to a room in this tab (refresh): rejoin straight away.
 			if (session.get(roomId)) return this.join(roomId);
 			this.showHome();
-			this.el.invite.textContent = `🎉 You're invited to room ${roomId}! Pick a name and hit Join.`;
+			this.el.invite.textContent = `You've been invited to room ${roomId}. Pick a name and join.`;
 			show(this.el.invite);
 			this.el.joinBtn.textContent = 'Join room';
+			this.el.joinBtn.className = 'btn btn-primary px-5';
 			this.el.username.focus();
 			this.el.username.select();
 			return;
@@ -682,7 +671,7 @@ class GameClient {
 		this.refreshLobby();
 		clearInterval(this.lobbyTimer);
 		this.lobbyTimer = setInterval(() => document.visibilityState === 'visible' && this.refreshLobby(), 5000);
-		document.title = 'Wutizzit – Draw, Guess, Win!';
+		document.title = 'Wutizzit · Draw it. Guess it.';
 	}
 
 	showGame() {
@@ -708,14 +697,19 @@ class GameClient {
 						h(
 							'button',
 							{
-								class: 'w-full p-2 bg-white rounded border flex justify-between items-center hover:bg-gray-50 text-left',
+								class: 'room-row',
 								onclick: () => {
 									this.el.roomInput.value = g.id;
 									this.join(g.id);
 								},
 							},
-							h('span', {}, h('span', { class: 'font-mono font-medium text-sm tracking-wider', text: g.id }), h('span', { class: 'block text-xs text-gray-500', text: `${g.playerCount} player${g.playerCount === 1 ? '' : 's'} • ${g.inGame ? 'In game' : 'Waiting to start'}` })),
-							h('span', { class: 'px-2 py-1 bg-blue-500 text-white text-xs rounded', text: 'Join' }),
+							h(
+								'span',
+								{ class: 'min-w-0' },
+								h('span', { class: 'block font-mono font-semibold tracking-[0.2em] text-sm', text: g.id }),
+								h('span', { class: 'block text-xs text-muted', text: `${g.playerCount} player${g.playerCount === 1 ? '' : 's'} · ${g.inGame ? 'In progress' : 'In the lobby'}` }),
+							),
+							h('span', { class: 'flex items-center gap-1 text-sm font-semibold text-accent' }, 'Join', icon('arrow')),
 						),
 					),
 				),
@@ -793,8 +787,10 @@ class GameClient {
 		this.deadline = null;
 		this.board.setEnabled(false);
 		this.board.clearLocal();
+		this.hideOverlay();
 		this.el.roomInput.value = '';
 		this.el.joinBtn.textContent = 'Join';
+		this.el.joinBtn.className = 'btn btn-secondary px-5';
 	}
 
 	validName() {
@@ -815,9 +811,12 @@ class GameClient {
 	onFatalClose(code) {
 		const roomId = this.roomId;
 		if (code === CLOSE.replaced) {
-			this.el.status.textContent = '📑 This room is open in another tab.';
+			this.el.status.textContent = 'This room is open in another tab';
 			this.setConnStatus('offline');
-			this.showOverlay(h('p', { class: 'text-lg', text: 'You opened this room in another tab.' }), h('button', { class: 'px-4 py-2 fun-button rounded-lg', text: 'Play here instead', onclick: () => this.join(roomId) }));
+			this.showOverlay(
+				h('p', { class: 'font-semibold', text: 'You opened this room in another tab.' }),
+				h('button', { class: 'btn btn-primary', text: 'Play here instead', onclick: () => this.join(roomId) }),
+			);
 			return;
 		}
 		if (code === CLOSE.invalidSession && roomId) {
@@ -829,14 +828,14 @@ class GameClient {
 		session.clear(roomId);
 		this.resetRoom();
 		history.pushState({}, '', '/');
-		this.showHome(code === CLOSE.kicked ? '🚫 The room owner removed you from the game.' : code === CLOSE.roomClosed ? 'That room has closed.' : undefined);
+		this.showHome(code === CLOSE.kicked ? 'The room owner removed you from the game.' : code === CLOSE.roomClosed ? 'That room has closed.' : undefined);
 	}
 
 	setConnStatus(s) {
 		const c = this.el.conn;
-		const labels = { connecting: '⏳ Connecting…', reconnecting: '⚠️ Reconnecting…', offline: '⛔ Offline', online: '' };
+		const labels = { connecting: 'Connecting', reconnecting: 'Reconnecting', offline: 'Offline' };
 		c.textContent = labels[s] ?? '';
-		c.className = `text-xs font-medium ${s === 'online' ? 'hidden' : s === 'offline' ? 'text-red-600' : 'text-amber-600'}`;
+		c.className = `status-pill ${s === 'online' ? 'hidden' : s === 'offline' ? 'offline' : ''}`;
 	}
 
 	// --- Messages ----------------------------------------------------------
@@ -884,10 +883,8 @@ class GameClient {
 		const isDrawer = round?.drawerId === me;
 		const phaseChanged = !prev || prev.phase !== next.phase || prev.roundNumber !== next.roundNumber;
 
-		// Canvas lifecycle.
 		if (phaseChanged) {
-			if (next.phase === 'choosing') this.board.clearLocal();
-			if (next.phase === 'lobby' && (initial || prev?.phase !== 'lobby')) this.board.drawLobbyArt();
+			if (next.phase === 'choosing' || (next.phase === 'lobby' && prev?.phase !== 'lobby')) this.board.clearLocal();
 			if (!initial) {
 				if (next.phase === 'choosing') this.sound.play(isDrawer ? 'your-turn' : 'round-start');
 				if (next.phase === 'intermission') this.sound.play('round-end');
@@ -914,14 +911,15 @@ class GameClient {
 
 	renderHeader(s, isDrawer) {
 		const drawer = s.players.find((p) => p.id === s.round?.drawerId);
+		const name = drawer?.username ?? 'Someone';
 		const lines = {
-			lobby: s.players.length < 2 ? '⏳ Waiting for more players. Share the link!' : s.you.isOwner ? '✅ Ready when you are. Hit Start!' : '⏳ Waiting for the owner to start…',
-			choosing: isDrawer ? '📝 Pick a word to draw!' : `🤔 ${drawer?.username ?? 'Someone'} is choosing a word…`,
-			drawing: isDrawer ? '🎨 You are drawing!' : s.round?.guessed ? '✅ You got it! Watch the others squirm.' : `🤔 Guess what ${drawer?.username ?? 'they'} is drawing!`,
-			intermission: '⏰ Round over!',
+			lobby: s.players.length < 2 ? 'Waiting for players' : s.you.isOwner ? 'Ready when you are' : 'Waiting for the owner to start',
+			choosing: isDrawer ? 'Pick a word to draw' : `${name} is picking a word`,
+			drawing: isDrawer ? 'Your turn to draw' : s.round?.guessed ? 'You got it. Nice one.' : `Guess what ${name} is drawing`,
+			intermission: 'Round over',
 		};
-		this.el.status.textContent = s.paused ? '⏸️ Game paused by the room owner' : lines[s.phase];
-		this.el.roundInfo.textContent = s.phase === 'lobby' ? `${s.players.length}/10 players` : `Round ${s.roundNumber} of ${s.maxRounds}`;
+		this.el.status.textContent = s.paused ? 'Paused by the room owner' : lines[s.phase];
+		this.el.roundInfo.textContent = s.phase === 'lobby' ? '' : `Round ${s.roundNumber} of ${s.maxRounds}`;
 	}
 
 	renderWord(s, isDrawer) {
@@ -931,42 +929,72 @@ class GameClient {
 		if (showWord) this.el.currentWord.textContent = round.word;
 		const showHint = !showWord && s.phase === 'drawing' && !!round?.hint;
 		show(this.el.wordHint, showHint);
-		if (showHint) {
-			this.el.hintText.textContent = round.hint;
-			const letters = [...round.hint].filter((c) => /[\p{L}\p{N}_]/u.test(c)).length;
-			const words = round.hint.split(/\s+/).filter(Boolean).length;
-			this.el.letterCount.textContent = `(${letters} letters${words > 1 ? `, ${words} words` : ''})`;
-		}
+		if (!showHint) return;
+
+		// One slot per letter; revealed letters fill their slot.
+		this.el.hintText.replaceChildren(
+			...[...round.hint].map((c) => {
+				if (c === ' ') return h('span', { class: 'hint-space' });
+				if (c === '_') return h('span', { class: 'hint-slot' });
+				if (/[\p{L}\p{N}]/u.test(c)) return h('span', { class: 'hint-slot revealed', text: c });
+				return h('span', { class: 'hint-punct', text: c });
+			}),
+		);
+		const letters = [...round.hint].filter((c) => /[\p{L}\p{N}_]/u.test(c)).length;
+		const words = round.hint.split(/\s+/).filter(Boolean).length;
+		const label = `${letters} letters${words > 1 ? `, ${words} words` : ''}`;
+		this.el.letterCount.textContent = label;
+		this.el.wordHint.setAttribute('aria-label', `Hint: ${round.hint.replace(/_/g, 'blank ')} (${label})`);
+	}
+
+	card(...children) {
+		return h('div', { class: 'overlay-card' }, ...children);
 	}
 
 	renderOverlay(s, isDrawer) {
 		const round = s.round;
-		if (s.paused) return this.showOverlay(h('p', { class: 'text-3xl', text: '⏸️' }), h('p', { class: 'text-xl font-semibold', text: 'Paused' }));
+		if (s.paused) {
+			return this.showOverlay(this.card(icon('pause', 'icon'), h('p', { class: 'text-lg font-bold', text: 'Paused' }), h('p', { class: 'text-sm text-muted', text: 'The room owner paused the game.' })));
+		}
+		if (s.phase === 'lobby') {
+			const enough = s.players.filter((p) => p.connected).length >= 2;
+			return this.showOverlay(
+				this.card(
+					h('p', { class: 'overlay-kicker', text: enough ? 'Lobby' : 'Waiting for players' }),
+					h('p', { class: 'text-lg font-bold', text: enough ? (s.you.isOwner ? 'Start the game when everyone is in' : 'The owner will start the game soon') : 'Invite at least one friend to play' }),
+					h('button', { class: 'btn btn-secondary', onclick: () => this.shareLink() }, icon('link'), 'Copy invite link'),
+				),
+			);
+		}
 		if (s.phase === 'choosing' && isDrawer && round?.choices) {
 			return this.showOverlay(
-				h('p', { class: 'text-xl font-semibold', text: 'Choose a word to draw' }),
-				h('div', { class: 'flex flex-wrap gap-2 justify-center' }, round.choices.map((word, i) => h('button', { class: 'px-4 py-2 fun-button rounded-lg text-lg', text: word, onclick: () => this.conn.send({ type: 'choose', index: i }) }))),
-				h('p', { class: 'text-sm opacity-80', 'data-countdown': '', text: '' }),
+				this.card(
+					h('p', { class: 'overlay-kicker', text: 'Your turn' }),
+					h('p', { class: 'text-lg font-bold', text: 'Choose a word to draw' }),
+					h('div', { class: 'flex flex-wrap gap-2 justify-center' }, round.choices.map((word, i) => h('button', { class: 'choice-btn', text: word, onclick: () => this.conn.send({ type: 'choose', index: i }) }))),
+					h('p', { class: 'text-xs text-muted', 'data-countdown': '' }),
+				),
 			);
 		}
 		if (s.phase === 'choosing') {
 			const drawer = s.players.find((p) => p.id === round?.drawerId);
-			return this.showOverlay(h('p', { class: 'text-4xl', text: avatarFor(round?.drawerId ?? '') }), h('p', { class: 'text-xl font-semibold', text: `${drawer?.username ?? 'Someone'} is choosing a word…` }));
+			return this.showOverlay(
+				this.card(drawer ? avatar(drawer, 'podium-avatar') : null, h('p', { class: 'text-lg font-bold', text: `${drawer?.username ?? 'Someone'} is picking a word` }), h('p', { class: 'text-sm text-muted', text: 'Get ready to guess.' })),
+			);
 		}
 		if (s.phase === 'intermission' && !s.lastRound) {
-			return this.showOverlay(h('p', { class: 'text-xl font-semibold', text: '⏭️ Skipping this turn…' }));
+			return this.showOverlay(this.card(h('p', { class: 'text-lg font-bold', text: 'Skipping this turn' })));
 		}
 		if (s.phase === 'intermission' && s.lastRound) {
 			const lr = s.lastRound;
 			const drawer = s.players.find((p) => p.id === lr.drawerId);
+			const rows = lr.scoreUpdates.map((u) => h('li', {}, h('span', { text: u.username }), h('span', { class: 'points', text: `+${u.points}` })));
+			if (lr.drawerPoints > 0 && drawer) rows.push(h('li', {}, h('span', { class: 'flex items-center gap-1.5' }, drawer.username, icon('pencil', 'icon icon-xs')), h('span', { class: 'points', text: `+${lr.drawerPoints}` })));
 			return this.showOverlay(
-				h('p', { class: 'text-sm uppercase tracking-wider opacity-80', text: 'The word was' }),
-				h('p', { class: 'text-3xl font-bold', text: lr.word }),
-				h(
-					'ul',
-					{ class: 'text-sm space-y-1' },
-					lr.scoreUpdates.length === 0 ? h('li', { text: '😅 Nobody got it this time!' }) : lr.scoreUpdates.map((u) => h('li', { text: `🎉 ${u.username} +${u.points}` })),
-					lr.drawerPoints > 0 && drawer ? h('li', { text: `🎨 ${drawer.username} +${lr.drawerPoints}` }) : null,
+				this.card(
+					h('p', { class: 'overlay-kicker', text: 'The word was' }),
+					h('p', { class: 'text-3xl font-extrabold tracking-tight', text: lr.word }),
+					rows.length ? h('ul', { class: 'score-list' }, rows) : h('p', { class: 'text-sm text-muted', text: 'Nobody got it this time.' }),
 				),
 			);
 		}
@@ -974,43 +1002,41 @@ class GameClient {
 	}
 
 	showOverlay(...children) {
+		// State updates arrive often (every guess, join, hint). Only rebuild, and re-run the entry
+		// animation, when the overlay's content actually changes.
+		const key = children.map((c) => c?.textContent ?? '').join('|');
+		if (key === this.overlayKey && !this.el.overlay.classList.contains('hidden')) return;
+		this.overlayKey = key;
 		this.el.overlay.replaceChildren(...children);
 		show(this.el.overlay);
 	}
 
 	hideOverlay() {
+		this.overlayKey = null;
 		show(this.el.overlay, false);
 		this.el.overlay.replaceChildren();
 	}
 
 	renderPlayers(s) {
-		const maxScore = Math.max(0, ...s.players.map((p) => p.score));
 		const sorted = [...s.players].sort((a, b) => b.score - a.score);
-		this.el.playerCount.textContent = `(${s.players.length}/10)`;
+		this.el.playerCount.textContent = `${s.players.length}/10`;
 		this.el.players.replaceChildren(
 			...sorted.map((p, i) => {
 				const isMe = p.id === s.you.id;
-				const badges = [p.id === s.ownerId ? '👑' : '', p.isDrawer ? '🎨' : '', p.guessed ? '✅' : '', maxScore > 0 && p.score === maxScore ? '🏅' : ''].join('');
-				const ring = p.isDrawer ? 'ring-2 ring-green-400' : isMe ? 'ring-2 ring-blue-400' : '';
+				const tags = [];
+				if (isMe) tags.push(h('span', { class: 'tag', text: 'You' }));
+				if (p.id === s.ownerId) tags.push(h('span', { class: 'tag', title: 'Room owner' }, icon('crown', 'icon icon-xs'), 'Host'));
+				if (p.isDrawer) tags.push(h('span', { class: 'tag tag-accent' }, icon('pencil', 'icon icon-xs'), 'Drawing'));
+				if (p.guessed) tags.push(h('span', { class: 'tag tag-success' }, icon('check', 'icon icon-xs'), 'Guessed'));
+				if (!p.connected) tags.push(h('span', { class: 'tag', text: 'Reconnecting' }));
 				return h(
 					'li',
-					{ class: `flex justify-between items-center gap-2 p-2.5 player-card ${ring} ${p.connected ? '' : 'offline'}` },
-					h(
-						'div',
-						{ class: 'flex items-center gap-2 min-w-0' },
-						h('span', { class: 'text-sm text-gray-600 w-5 text-right tabular-nums', text: `#${i + 1}` }),
-						h('span', { class: 'text-lg', 'aria-hidden': 'true', text: avatarFor(p.id) }),
-						h('span', { class: `truncate ${isMe ? 'font-bold text-blue-800' : 'font-medium'}`, title: p.username, text: p.username }),
-						isMe ? h('span', { class: 'text-xs text-blue-700', text: '(you)' }) : null,
-						p.connected ? null : h('span', { class: 'text-xs text-gray-600', title: 'Reconnecting', text: '📡' }),
-						badges ? h('span', { class: 'shrink-0', text: badges }) : null,
-					),
-					h(
-						'div',
-						{ class: 'flex items-center gap-2 shrink-0' },
-						h('span', { class: 'text-sm font-bold tabular-nums', text: p.score }),
-						s.you.isOwner && !isMe ? h('button', { class: 'text-xs px-1.5 py-0.5 bg-red-500 text-white rounded hover:bg-red-600', title: `Remove ${p.username}`, 'aria-label': `Remove ${p.username}`, text: '🚫', onclick: () => this.kick(p) }) : null,
-					),
+					{ class: `player ${isMe ? 'me' : ''} ${p.isDrawer ? 'drawing' : ''} ${p.connected ? '' : 'offline'}` },
+					h('span', { class: 'rank', text: i + 1 }),
+					avatar(p),
+					h('div', { class: 'min-w-0 flex-1' }, h('div', { class: 'truncate text-sm font-semibold', title: p.username, text: p.username }), tags.length ? h('div', { class: 'mt-0.5 flex flex-wrap gap-1' }, tags) : null),
+					h('span', { class: 'text-sm font-bold tabular-nums', text: p.score }),
+					s.you.isOwner && !isMe ? h('button', { class: 'kick-btn', title: `Remove ${p.username}`, 'aria-label': `Remove ${p.username}`, onclick: () => this.kick(p) }, icon('x')) : null,
 				);
 			}),
 		);
@@ -1019,13 +1045,12 @@ class GameClient {
 	renderOwnerControls(s) {
 		const owner = s.you.isOwner;
 		const lobby = s.phase === 'lobby';
-		show(this.el.settings, owner && lobby);
-		show(this.el.startBtn, owner && lobby);
+		show(this.el.ownerBar, owner && lobby);
 		const ready = s.players.filter((p) => p.connected).length;
 		this.el.startBtn.disabled = ready < 2;
-		this.el.startBtn.textContent = ready < 2 ? '⏳ Need 2+ players' : s.results ? '🔁 Play again' : '🚀 Start game';
+		this.el.startBtn.replaceChildren(...(ready < 2 ? ['Need 2+ players'] : s.results ? [icon('replay'), 'Play again'] : [icon('play'), 'Start game']));
 		show(this.el.pauseBtn, owner && (s.phase === 'drawing' || s.phase === 'choosing'));
-		this.el.pauseBtn.textContent = s.paused ? '▶️ Resume' : '⏸️ Pause';
+		this.el.pauseBtn.replaceChildren(icon(s.paused ? 'play' : 'pause'), s.paused ? 'Resume' : 'Pause');
 		if (owner && lobby) this.updateRoundOptions(Math.max(2, s.players.length));
 	}
 
@@ -1037,13 +1062,13 @@ class GameClient {
 		sel.dataset.players = key;
 		// Multiples of the player count so everyone draws the same number of times.
 		const opts = [1, 2, 3, 4, 5].map((n) => n * playerCount).filter((r) => r <= 50);
-		sel.replaceChildren(...opts.map((r) => h('option', { value: r, text: `${r} (${r / playerCount}× each)` })));
+		sel.replaceChildren(...opts.map((r) => h('option', { value: r, text: `${r} (${r / playerCount} each)` })));
 		sel.value = opts.includes(current) ? current : opts[Math.min(1, opts.length - 1)];
 	}
 
 	renderChatInput(s, isDrawer) {
 		const input = this.el.chatInput;
-		if (s.phase !== 'drawing') input.placeholder = 'Say hi…';
+		if (s.phase !== 'drawing') input.placeholder = 'Say something…';
 		else if (isDrawer) input.placeholder = 'Chat with players who guessed…';
 		else if (s.round?.guessed) input.placeholder = 'Chat with the others who got it…';
 		else input.placeholder = 'Type your guess…';
@@ -1052,16 +1077,14 @@ class GameClient {
 
 	addChat(m, live) {
 		const s = this.state;
-		const cls = m.kind === 'system' ? 'system' : m.kind === 'correct' ? 'correct' : m.kind === 'notice' ? 'notice' : m.round ? 'private' : '';
-		const time = new Date(m.ts || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-		const node = h(
-			'div',
-			{ class: `chat-bubble ${cls}` },
-			h('span', { class: 'opacity-70 text-xs mr-1', text: time }),
-			m.username && m.kind === 'chat' ? h('span', { class: 'font-semibold mr-1', text: `${m.username}:` }) : null,
-			m.kind === 'chat' && m.round ? h('span', { title: 'Only visible to the drawer and players who guessed', text: '🤫 ' }) : null,
-			m.text,
-		);
+		let node;
+		if (m.kind === 'system') node = h('div', { class: 'msg msg-system', text: m.text });
+		else if (m.kind === 'correct') node = h('div', { class: 'msg msg-correct' }, icon('check'), h('span', { text: m.text }));
+		else if (m.kind === 'notice') node = h('div', { class: 'msg msg-notice', text: m.text });
+		else {
+			const body = [h('span', { class: 'msg-name', text: m.username }), h('span', { text: m.text })];
+			node = m.round ? h('div', { class: 'msg msg-private', title: 'Only the drawer and players who guessed can see this' }, icon('lock', 'icon icon-xs'), h('span', {}, body)) : h('div', { class: 'msg' }, body);
+		}
 		const box = this.el.chat;
 		const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
 		box.append(node);
@@ -1098,14 +1121,10 @@ class GameClient {
 
 	async shareLink() {
 		const url = `${location.origin}/room/${this.roomId}`;
-		const btn = this.el.copyBtn;
-		const flash = (text) => {
-			btn.textContent = text;
-			setTimeout(() => (btn.textContent = '📋 Share link'), 2000);
-		};
+		const label = this.el.copyBtn.querySelector('span');
 		if (navigator.share && matchMedia('(pointer: coarse)').matches) {
 			try {
-				await navigator.share({ title: 'Join my Wutizzit game!', text: `Come draw with me in room ${this.roomId}`, url });
+				await navigator.share({ title: 'Join my Wutizzit game', text: `Come draw with me in room ${this.roomId}`, url });
 				return;
 			} catch (err) {
 				if (err?.name === 'AbortError') return;
@@ -1113,7 +1132,8 @@ class GameClient {
 		}
 		try {
 			await navigator.clipboard.writeText(url);
-			flash('✅ Copied!');
+			label.textContent = 'Link copied';
+			setTimeout(() => (label.textContent = 'Invite'), 2000);
 		} catch {
 			prompt('Copy this link:', url);
 		}
@@ -1152,24 +1172,31 @@ class GameClient {
 			return;
 		}
 		this.customWords = words.length ? words : null;
-		this.el.wordsBtn.textContent = this.customWords ? `📝 Custom words (${words.length})` : '📝 Custom words';
+		this.el.wordsBtn.querySelector('span').textContent = this.customWords ? `Custom words (${words.length})` : 'Custom words';
 	}
 
 	showWinner(results) {
 		const top = results.finalScores;
 		const me = this.state?.you.id;
-		this.el.winnerTitle.textContent = results.reason ? `🏁 ${results.reason}` : top[0]?.id === me ? '🎉 You won! 🎉' : '🎉 Game complete! 🎉';
+		const players = new Map((this.state?.players ?? []).map((p) => [p.id, p]));
+		const winner = top[0];
+		this.el.winnerTitle.textContent = results.reason ? 'Game over' : winner?.id === me ? 'You won!' : `${winner?.username ?? 'Someone'} wins`;
+		this.el.winnerSubtitle.textContent = results.reason ? `${results.reason}.` : winner ? `${winner.score} points. Well played, everyone.` : '';
 		[1, 2, 3].forEach((place) => {
 			const slot = $(`podium-${place}`);
 			const p = top[place - 1];
 			slot.style.visibility = p ? 'visible' : 'hidden';
-			slot.querySelector('.podium-name').textContent = p?.username ?? '–';
+			const av = slot.querySelector('.podium-avatar');
+			if (p) {
+				const fresh = avatar(players.get(p.id) ?? p, 'podium-avatar');
+				av.replaceWith(fresh);
+			}
+			slot.querySelector('.podium-name').textContent = p?.username ?? '';
 			slot.querySelector('.podium-score').textContent = p ? `${p.score} pts` : '';
 		});
-		const gif = this.el.gif;
-		gif.onerror = () => show(gif, false);
-		gif.onload = () => show(gif, true);
-		gif.src = CELEBRATION_GIFS[Math.floor(Math.random() * CELEBRATION_GIFS.length)];
+		this.el.resultsRest.replaceChildren(
+			...top.slice(3).map((p, i) => h('li', { class: 'flex justify-between' }, h('span', { class: 'text-muted', text: `${i + 4}. ${p.username}` }), h('span', { class: 'tabular-nums font-semibold', text: p.score }))),
+		);
 		this.sound.play('win');
 		if (!this.el.winnerModal.open) this.el.winnerModal.showModal();
 	}
@@ -1180,20 +1207,39 @@ class GameClient {
 
 	tick() {
 		const s = this.state;
+		const ring = this.el.timerRing;
+		const C = 119.4; // 2πr for r=19
 		if (!s || this.deadline == null) {
-			this.el.timer.textContent = s?.phase === 'lobby' ? '–' : this.el.timer.textContent;
-			this.el.timer.classList.remove('timer-urgent');
+			this.el.timerText.textContent = '–';
+			ring.style.strokeDashoffset = String(C);
+			this.el.timer.classList.remove('urgent');
 			return;
 		}
 		const remaining = s.paused ? s.remaining : Math.max(0, this.deadline - performance.now());
-		this.el.timer.textContent = formatTime(remaining);
+		const total = s.phase === 'drawing' ? s.settings.roundDuration * 1000 : TOTAL_MS[s.phase] ?? remaining;
 		const secs = Math.ceil(remaining / 1000);
+		this.el.timerText.textContent = secs >= 60 ? formatTime(remaining) : String(secs);
+		ring.style.strokeDashoffset = String(C * (1 - Math.min(1, remaining / Math.max(1, total))));
 		const urgent = s.phase === 'drawing' && !s.paused && secs <= 10 && secs > 0;
-		this.el.timer.classList.toggle('timer-urgent', urgent);
+		this.el.timer.classList.toggle('urgent', urgent);
 		if (urgent && this.lastTick !== secs) this.sound.play('tick');
 		this.lastTick = secs;
 		const cd = this.el.overlay.querySelector('[data-countdown]');
-		if (cd) cd.textContent = `${secs}s left to choose (we'll pick one for you)`;
+		if (cd) cd.textContent = `${secs}s left. We'll pick one for you if time runs out.`;
+	}
+
+	setTool(fill) {
+		const e = this.el;
+		this.board.fillMode = fill;
+		e.fillBtn.setAttribute('aria-pressed', String(fill));
+		e.brushBtn.setAttribute('aria-pressed', String(!fill));
+		this.board.canvas.classList.toggle('fill-mode', fill);
+	}
+
+	updateBrushPreview() {
+		const p = this.el.brushPreview;
+		p.style.setProperty('--size', `${Math.max(3, Math.min(28, this.board.width * 0.7))}px`);
+		p.style.setProperty('--color', this.board.color);
 	}
 
 	// --- Wiring ------------------------------------------------------------
@@ -1238,23 +1284,22 @@ class GameClient {
 				return b;
 			}),
 		);
+		this.board.color = COLORS[0];
 		e.swatches.addEventListener('click', (ev) => {
 			const btn = ev.target.closest('.color-swatch');
 			if (!btn) return;
 			this.board.color = btn.dataset.color;
 			for (const s of e.swatches.children) s.setAttribute('aria-pressed', String(s === btn));
+			this.updateBrushPreview();
 		});
 		e.brush.addEventListener('input', () => {
 			this.board.width = Number(e.brush.value);
+			this.updateBrushPreview();
 		});
 		this.board.width = Number(e.brush.value);
-		e.fillBtn.addEventListener('click', () => {
-			this.board.fillMode = !this.board.fillMode;
-			e.fillBtn.setAttribute('aria-pressed', String(this.board.fillMode));
-			e.fillBtn.classList.toggle('ring-2', this.board.fillMode);
-			e.fillBtn.classList.toggle('ring-green-300', this.board.fillMode);
-			this.board.canvas.classList.toggle('fill-mode', this.board.fillMode);
-		});
+		this.updateBrushPreview();
+		e.brushBtn.addEventListener('click', () => this.setTool(false));
+		e.fillBtn.addEventListener('click', () => this.setTool(true));
 		e.undoBtn.addEventListener('click', () => {
 			this.board.undo();
 			this.updateUndo();
@@ -1269,7 +1314,12 @@ class GameClient {
 				ev.preventDefault();
 				this.board.undo();
 				this.updateUndo();
+				return;
 			}
+			// Single-key tool shortcuts, but never while typing in chat.
+			if (ev.target instanceof HTMLInputElement || ev.target instanceof HTMLTextAreaElement || ev.metaKey || ev.ctrlKey || ev.altKey) return;
+			if (ev.key === 'b') this.setTool(false);
+			if (ev.key === 'f') this.setTool(true);
 		});
 
 		// Best-effort leave when the tab closes; refresh within the grace period keeps the seat anyway.

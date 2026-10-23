@@ -1,8 +1,8 @@
 # Project Rules & Preferences
 
 ## User Preferences
-- Prefers fun and whimsical UI design with bright colors and gradients
-- Likes emoji-based visual elements (avatars, crowns, etc.)
+- Modern, clean UI (2026-10 redesign): restrained, not cartoonish. Few or no emojis
+- Keep a bit of personality via the violet→coral accent, the wordmark and playful copy
 - Values real-time feedback and visual polish
 - Appreciates absurd/silly randomness (like funny username generators)
 - Wants room creators to have control over game settings
@@ -18,12 +18,12 @@
 - Use consistent avatar generation based on player ID for persistence
 
 ## UI Design Rules
-- Background gradients for visual appeal
-- Rounded corners (15px+) for friendly feel  
-- Box shadows for depth
-- Hover animations and transitions
-- Color palette: coral (#ff6b6b), yellow (#ffd93d), purple gradients (#667eea, #764ba2)
-- Use emoji generously for fun factor
+- Warm off-white page (#f7f6f3) with a faint dot grid; white cards with 1px #e7e5e0 borders, 1rem radius
+- One accent: violet #6d4dff (coral #ff6b6b only for the gradient and urgent timer)
+- Icons come from the inline SVG sprite in index.html (Lucide-style, `icon(name)` in game.js). No emojis in UI copy or server messages
+- Avatars are initials on a colour picked from the player id
+- Component classes live in src/client/styles.css (`card`, `btn-*`, `input`, `tag`, `msg-*`, `overlay-card`)
+- Overlays only re-render when their text changes (`showOverlay` key) so animations don't replay on every state update
 
 ## Game Logic
 - Games have 10 rounds by default

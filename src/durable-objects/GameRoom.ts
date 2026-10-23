@@ -290,7 +290,7 @@ export class GameRoomObject extends DurableObject<Env> {
 		player.leaveAt = null;
 		if (!player.seen) {
 			player.seen = true;
-			this.system(`👋 ${player.username} joined`);
+			this.system(`${player.username} joined`);
 		}
 		if (!wasConnected) this.broadcastState(player.id);
 		await this.commit();
@@ -327,7 +327,7 @@ export class GameRoomObject extends DurableObject<Env> {
 				return;
 			case 'chat':
 				if (this.allow(`c:${playerId}`, 6, 1)) await this.onChat(playerId, msg.text);
-				else this.send(ws, { type: 'notice', text: 'Slow down a little! 🐢' });
+				else this.send(ws, { type: 'notice', text: 'Slow down a little.' });
 				return;
 			case 'choose':
 				return this.onChoose(playerId, msg.index);
@@ -374,7 +374,7 @@ export class GameRoomObject extends DurableObject<Env> {
 
 		if (s.pausedAt === null && s.deadline !== null && s.deadline <= now) {
 			if (s.phase === 'choosing' && s.round) this.chooseWord(s.round, pickRandom(s.round.choices));
-			else if (s.phase === 'drawing') this.endRound('⏰ Time is up!');
+			else if (s.phase === 'drawing') this.endRound("Time's up.");
 			else if (s.phase === 'intermission') this.nextRoundOrFinish();
 		}
 
@@ -414,7 +414,7 @@ export class GameRoomObject extends DurableObject<Env> {
 				if (!this.canvasFullNotified) {
 					this.canvasFullNotified = true;
 					this.send(ws, { type: 'resync', ops: this.loadOps() });
-					this.send(ws, { type: 'notice', text: '🖼️ The canvas is full! Undo or clear to keep drawing.' });
+					this.send(ws, { type: 'notice', text: 'The canvas is full. Undo or clear to keep drawing.' });
 				}
 				return;
 			}
@@ -431,7 +431,7 @@ export class GameRoomObject extends DurableObject<Env> {
 		const text = cleanChat(rawText);
 		if (!text) return;
 		const round = s.round;
-		if (s.pausedAt !== null) return this.sendTo(playerId, { type: 'notice', text: 'The game is paused ⏸️' });
+		if (s.pausedAt !== null) return this.sendTo(playerId, { type: 'notice', text: 'The game is paused.' });
 
 		// Outside of drawing, chat is just chat.
 		if (s.phase !== 'drawing' || !round?.word) {
@@ -444,7 +444,7 @@ export class GameRoomObject extends DurableObject<Env> {
 		if (round.drawerId === playerId || round.guessed.includes(playerId)) {
 			// Deliberately stricter than containsWord(): "cats" or "bobcat" would still give the word away.
 			if (round.drawerId === playerId && normalizeGuess(text).includes(normalizeGuess(round.word))) {
-				this.sendTo(playerId, { type: 'notice', text: "Nice try! You can't say the word 🤫" });
+				this.sendTo(playerId, { type: 'notice', text: "You can't say the word." });
 				return;
 			}
 			this.pushChat({ id: generateId(), ts: Date.now(), kind: 'chat', playerId, username: player.username, text, round: round.number });
@@ -471,8 +471,8 @@ export class GameRoomObject extends DurableObject<Env> {
 		}
 
 		// Near misses and guesses that contain the word ("is it a cat?") would give it away: keep them private.
-		if (containsWord(text, round.word)) return this.sendTo(playerId, { type: 'notice', text: `"${text}" is very close! Just the word, please 🔥` });
-		if (isCloseGuess(text, round.word)) return this.sendTo(playerId, { type: 'notice', text: `"${text}" is close! 🔥` });
+		if (containsWord(text, round.word)) return this.sendTo(playerId, { type: 'notice', text: `"${text}" is very close. Just the word, please.` });
+		if (isCloseGuess(text, round.word)) return this.sendTo(playerId, { type: 'notice', text: `"${text}" is close!` });
 		this.pushChat({ id: generateId(), ts: Date.now(), kind: 'chat', playerId, username: player.username, text });
 		await this.commit();
 	}
@@ -505,7 +505,7 @@ export class GameRoomObject extends DurableObject<Env> {
 		s.drawQueue = [...s.order];
 		s.results = null;
 		s.lastRound = null;
-		this.system('🚀 Game started! Good luck!');
+		this.system('Game started. Good luck!');
 		this.startRound();
 		await this.commit();
 	}
@@ -516,14 +516,14 @@ export class GameRoomObject extends DurableObject<Env> {
 		const now = Date.now();
 		if (s.pausedAt === null) {
 			s.pausedAt = now;
-			this.system('⏸️ Game paused');
+			this.system('Game paused');
 		} else {
 			// Shift every timer forward by however long we were paused.
 			const delta = now - s.pausedAt;
 			if (s.deadline !== null) s.deadline += delta;
 			if (s.round) s.round.hintAt = s.round.hintAt.map((t) => t + delta);
 			s.pausedAt = null;
-			this.system('▶️ Game resumed');
+			this.system('Game resumed');
 		}
 		this.broadcastState();
 		await this.commit();
@@ -617,7 +617,7 @@ export class GameRoomObject extends DurableObject<Env> {
 		if (s.phase !== 'drawing' || !round) return false;
 		const guessers = s.order.filter((id) => id !== round.drawerId && s.players[id].connected);
 		if (guessers.length > 0 && guessers.every((id) => round.guessed.includes(id))) {
-			this.endRound('🎉 Everyone guessed it!');
+			this.endRound('Everyone guessed it.');
 			return true;
 		}
 		return false;
@@ -662,7 +662,7 @@ export class GameRoomObject extends DurableObject<Env> {
 		s.pausedAt = null;
 		s.drawQueue = [];
 		s.results = hadGame ? { id: generateId(), finalScores, reason } : null;
-		if (hadGame && finalScores[0]) this.system(reason ? `🏁 Game over: ${reason}.` : `🏆 ${finalScores[0].username} wins with ${finalScores[0].score} points!`);
+		if (hadGame && finalScores[0]) this.system(reason ? `Game over: ${reason}.` : `${finalScores[0].username} wins with ${finalScores[0].score} points!`);
 		this.broadcastState();
 		this.reportStats(true);
 	}
@@ -680,11 +680,11 @@ export class GameRoomObject extends DurableObject<Env> {
 		this.resyncPending.delete(playerId);
 
 		const verb = why === 'kicked' ? 'was removed' : why === 'timeout' ? 'disconnected' : 'left';
-		if (player.seen) this.system(`🚪 ${player.username} ${verb}`);
+		if (player.seen) this.system(`${player.username} ${verb}`);
 
 		if (s.ownerId === playerId) {
 			s.ownerId = s.order.find((id) => s.players[id].connected) ?? s.order[0] ?? null;
-			if (s.ownerId) this.system(`👑 ${s.players[s.ownerId].username} is now the room owner`);
+			if (s.ownerId) this.system(`${s.players[s.ownerId].username} is now the host`);
 		}
 
 		if (s.order.length === 0) {
@@ -697,7 +697,7 @@ export class GameRoomObject extends DurableObject<Env> {
 		} else if (s.phase !== 'lobby' && s.order.length < 2) {
 			this.finishGame('Not enough players');
 		} else if (s.round?.drawerId === playerId && (s.phase === 'drawing' || s.phase === 'choosing')) {
-			this.endRound(`🎨 ${player.username} left mid-drawing.`);
+			this.endRound(`${player.username} left mid-turn.`);
 		} else if (!this.maybeFinishRound()) {
 			this.broadcastState();
 		}
