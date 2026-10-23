@@ -48,8 +48,11 @@ class Client {
 	waitClosed(timeout = 2000): Promise<{ code: number }> {
 		if (this.closed) return Promise.resolve(this.closed);
 		return new Promise((resolve, reject) => {
-			this.onClose = () => resolve(this.closed!);
-			setTimeout(() => reject(new Error('timed out waiting for close')), timeout);
+			const timer = setTimeout(() => reject(new Error('timed out waiting for close')), timeout);
+			this.onClose = () => {
+				clearTimeout(timer);
+				resolve(this.closed!);
+			};
 		});
 	}
 
