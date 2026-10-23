@@ -19,7 +19,7 @@
 
 ## UI Design Rules
 - Warm off-white page (#f7f6f3) with a faint dot grid; white cards with 1px #e7e5e0 borders, 1rem radius
-- One accent: violet #6d4dff (coral #ff6b6b only for the gradient and urgent timer)
+- One accent: violet #6d4dff. Coral #ff6b6b only for the gradient and the urgent timer ring; the urgent number uses the danger token (#dc2626) for contrast
 - Icons come from the inline SVG sprite in index.html (Lucide-style, `icon(name)` in game.js). No emojis in UI copy or server messages
 - Avatars are initials on a colour picked from the player id
 - Component classes live in src/client/styles.css (`card`, `btn-*`, `input`, `tag`, `msg-*`, `overlay-card`)

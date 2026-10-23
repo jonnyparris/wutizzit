@@ -1,9 +1,13 @@
 // Browser end-to-end run: 3 players (one on a touch phone) play a round.
 // Usage: npm run dev, then BASE_URL=http://localhost:8787 npm run test:e2e
+import { mkdirSync } from 'node:fs';
 import { chromium } from 'playwright-core';
 const BASE = process.env.BASE_URL ?? 'http://localhost:8787';
 const exe = process.env.CHROMIUM_PATH; // optional: defaults to Playwright's bundled Chromium
 const browser = await chromium.launch({ executablePath: exe || undefined, headless: true });
+try {
+const OUT = new URL('./out', import.meta.url).pathname;
+mkdirSync(OUT, { recursive: true });
 const errors = [];
 const assert = (ok, msg) => { if (!ok) { console.error('ASSERT FAILED:', msg); process.exitCode = 1; } };
 async function player(name, mobile = false) {
@@ -33,7 +37,7 @@ await c.goto(roomUrl);
 await c.fill('#username-input', 'Cara');
 await c.click('#join-room-btn');
 await a.waitForFunction(() => document.querySelectorAll('#players-list li').length === 3);
-await a.screenshot({ path: 'lobby.jpg', type: 'jpeg', quality: 60 });
+await a.screenshot({ path: `${OUT}/lobby.jpg`, type: 'jpeg', quality: 60 });
 
 // Start: 3 rounds, 30s
 await a.waitForFunction(() => !document.querySelector('#start-game-btn').disabled);
@@ -48,8 +52,8 @@ for (let i = 0; i < 40 && !drawer; i++) {
 }
 console.log('drawer', drawer.name);
 const guessers = pages.filter((p) => p !== drawer);
-await guessers[0].screenshot({ path: 'choosing-guesser.jpg', type: 'jpeg', quality: 60 });
-await drawer.screenshot({ path: 'choosing-drawer.jpg', type: 'jpeg', quality: 60 });
+await guessers[0].screenshot({ path: `${OUT}/choosing-guesser.jpg`, type: 'jpeg', quality: 60 });
+await drawer.screenshot({ path: `${OUT}/choosing-drawer.jpg`, type: 'jpeg', quality: 60 });
 await drawer.click('#canvas-overlay button.choice-btn >> nth=0');
 await drawer.waitForSelector('#word-display:not(.hidden)');
 const word = await drawer.textContent('#current-word');
@@ -70,12 +74,14 @@ await drawer.click('#fill-tool');
 await drawer.mouse.click(box.x + box.width * 0.5, box.y + box.height * 0.5);
 await drawer.waitForTimeout(400);
 const hint = await guessers[0].evaluate(() => document.querySelectorAll('#hint-text .hint-slot').length);
-console.log('hint', JSON.stringify(hint));
-await guessers[0].screenshot({ path: 'drawing-guesser.jpg', type: 'jpeg', quality: 60 });
+assert(hint === word.replace(/[^\p{L}\p{N}]/gu, '').length, `hint slots (${hint}) match letters in "${word}"`);
+await guessers[0].screenshot({ path: `${OUT}/drawing-guesser.jpg`, type: 'jpeg', quality: 60 });
 
 // Compare pixels drawer vs guesser
 const px = (p) => p.evaluate(() => { const cv = document.getElementById('game-canvas'); const d = cv.getContext('2d').getImageData(cv.width/2, cv.height/2, 1, 1).data; return [...d]; });
-console.log('center pixel drawer', await px(drawer), 'guesser', await px(guessers[0]), 'mobile?', guessers.includes(c));
+const drawerPx = await px(drawer);
+assert(drawerPx[3] === 255 && drawerPx.join() !== '255,255,255,255', 'fill painted the centre on the drawer');
+assert(drawerPx.join() === (await px(guessers[0])).join(), 'guesser canvas matches drawer');
 
 // wrong guess then close guess then correct
 await guessers[0].fill('#chat-input', 'definitely not it');
@@ -95,15 +101,17 @@ const after = await guessers[0].evaluate(() => ({ score: window.wutizzit.state.p
 assert(after.score === scoreBefore && after.score > 0, `score kept across refresh (${scoreBefore} -> ${after.score})`);
 assert(after.ops > 0, 'canvas replayed after refresh');
 assert(after.word === word, 'guesser who got it still sees the word');
-console.log('center pixel after refresh', await px(guessers[0]));
+assert(drawerPx.join() === (await px(guessers[0])).join(), 'canvas matches drawer after refresh');
 
 await guessers[1].fill('#chat-input', word);
 await guessers[1].press('#chat-input', 'Enter');
 await a.waitForFunction(() => window.wutizzit.state.phase === 'intermission');
-await a.screenshot({ path: 'intermission.jpg', type: 'jpeg', quality: 60 });
-await c.screenshot({ path: 'intermission-mobile.jpg', type: 'jpeg', quality: 60, fullPage: true });
+await a.screenshot({ path: `${OUT}/intermission.jpg`, type: 'jpeg', quality: 60 });
+await c.screenshot({ path: `${OUT}/intermission-mobile.jpg`, type: 'jpeg', quality: 60, fullPage: true });
 await a.waitForFunction(() => window.wutizzit.state.phase === 'choosing' && window.wutizzit.state.roundNumber === 2, null, { timeout: 10000 });
 console.log('round 2 started');
 assert(errors.length === 0, `console errors: ${errors.join(' | ')}`);
 console.log(process.exitCode ? 'FAILED' : 'game-flow OK');
-await browser.close();
+} finally {
+	await browser.close();
+}

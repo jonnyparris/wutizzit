@@ -64,7 +64,7 @@ A real-time multiplayer drawing and guessing game built with Cloudflare Workers,
 npm install
 npm run dev        # wrangler dev (builds Tailwind first). Run `npm run dev:css` alongside to watch CSS.
 npm test           # Vitest inside the Workers runtime (@cloudflare/vitest-plugin)
-BASE_URL=http://localhost:8787 npm run test:e2e   # Browser e2e (needs `npm run dev`; set CHROMIUM_PATH if Playwright browsers are not installed)
+BASE_URL=http://localhost:8787 npm run test:e2e   # Browser e2e (needs `npm run dev` and `npx playwright install chromium`, or set CHROMIUM_PATH)
 npm run typecheck
 npm run deploy     # builds CSS, then wrangler deploy
 ```

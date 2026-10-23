@@ -917,9 +917,9 @@ class GameClient {
 	renderHeader(s, isDrawer) {
 		const drawer = s.players.find((p) => p.id === s.round?.drawerId);
 		const name = drawer?.username ?? 'Someone';
-		const ready = s.players.filter((p) => p.connected).length;
+		const connectedCount = s.players.filter((p) => p.connected).length;
 		const lines = {
-			lobby: ready < 2 ? 'Waiting for players' : s.you.isOwner ? 'Ready when you are' : 'Waiting for the owner to start',
+			lobby: connectedCount < 2 ? 'Waiting for players' : s.you.isOwner ? 'Ready when you are' : 'Waiting for the owner to start',
 			choosing: isDrawer ? 'Pick a word to draw' : `${name} is picking a word`,
 			drawing: isDrawer ? 'Your turn to draw' : s.round?.guessed ? 'You got it. Nice one.' : `Guess what ${name} is drawing`,
 			intermission: 'Round over',
@@ -1058,9 +1058,9 @@ class GameClient {
 		const owner = s.you.isOwner;
 		const lobby = s.phase === 'lobby';
 		show(this.el.ownerBar, owner && lobby);
-		const ready = s.players.filter((p) => p.connected).length;
-		this.el.startBtn.disabled = ready < 2;
-		this.el.startBtn.replaceChildren(...(ready < 2 ? ['Need 2+ players'] : s.results ? [icon('replay'), 'Play again'] : [icon('play'), 'Start game']));
+		const connectedCount = s.players.filter((p) => p.connected).length;
+		this.el.startBtn.disabled = connectedCount < 2;
+		this.el.startBtn.replaceChildren(...(connectedCount < 2 ? ['Need 2+ players'] : s.results ? [icon('replay'), 'Play again'] : [icon('play'), 'Start game']));
 		show(this.el.pauseBtn, owner && (s.phase === 'drawing' || s.phase === 'choosing'));
 		this.el.pauseBtn.replaceChildren(icon(s.paused ? 'play' : 'pause'), s.paused ? 'Resume' : 'Pause');
 		if (owner && lobby) this.updateRoundOptions(Math.max(2, s.players.length));
