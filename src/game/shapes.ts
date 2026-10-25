@@ -201,6 +201,48 @@ function ellipsePoints(cx: number, cy: number, rx: number, ry: number): Point[] 
 	});
 }
 
+/**
+ * Makes a geometric outline look hand-drawn: a smooth, low-frequency wobble across the line (two
+ * sine waves with random phase, like an unsteady hand), slightly uneven spacing, and for closed
+ * shapes a random start point and a small overlap past it. The wobble fades to zero at both ends,
+ * so a closed outline still meets itself and a fill can't leak out through a gap.
+ */
+export function wobble(dense: Point[], closed: boolean, rand: () => number = Math.random): Point[] {
+	const n = dense.length;
+	if (n < 3) return dense;
+	let pts = dense;
+	if (closed) {
+		// Start somewhere random on the loop and carry on a little past the start, as people do.
+		const first = pts.at(-1)![0] === pts[0][0] && pts.at(-1)![1] === pts[0][1] ? pts.slice(0, -1) : pts;
+		const k = Math.floor(rand() * first.length);
+		const overlap = Math.min(first.length - 1, 2 + Math.floor(rand() * 3));
+		const loop = [...first.slice(k), ...first.slice(0, k)];
+		pts = [...loop, ...loop.slice(0, overlap + 1)];
+	}
+	let len = 0;
+	for (let i = 1; i < pts.length; i++) len += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
+	const amp = Math.max(0.8, Math.min(2.6, len * 0.005));
+	const p1 = 40 + rand() * 60; // wavelengths in px
+	const p2 = 12 + rand() * 14;
+	const f1 = rand() * 2 * Math.PI;
+	const f2 = rand() * 2 * Math.PI;
+	const ramp = Math.min(6, Math.floor(pts.length / 4));
+	const out: Point[] = [];
+	let d = 0;
+	for (let i = 0; i < pts.length; i++) {
+		if (i > 0) d += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
+		const a = pts[Math.max(0, i - 1)];
+		const b = pts[Math.min(pts.length - 1, i + 1)];
+		const tx = b[0] - a[0];
+		const ty = b[1] - a[1];
+		const tl = Math.hypot(tx, ty) || 1;
+		const fade = ramp ? Math.min(1, i / ramp, (pts.length - 1 - i) / ramp) : 1;
+		const off = amp * fade * (0.7 * Math.sin((2 * Math.PI * d) / p1 + f1) + 0.3 * Math.sin((2 * Math.PI * d) / p2 + f2));
+		out.push([pts[i][0] - (ty / tl) * off, pts[i][1] + (tx / tl) * off]);
+	}
+	return out;
+}
+
 const centroid = (pts: Point[]): Point => [pts.reduce((s, p) => s + p[0], 0) / pts.length, pts.reduce((s, p) => s + p[1], 0) / pts.length];
 
 const round1 = (v: number) => Math.round(v * 10) / 10;
@@ -209,15 +251,19 @@ const round1 = (v: number) => Math.round(v * 10) / 10;
  * Converts shapes to draw ops. Each shape gets its own stroke id (so one undo removes one shape)
  * and long outlines are split into overlapping chunks of a few points for gradual replay.
  */
-export function shapesToOps(shapes: readonly Shape[], firstStrokeId: number, maxOps = Infinity): DrawOp[] {
+export function shapesToOps(shapes: readonly Shape[], firstStrokeId: number, maxOps = Infinity, opts: { freehand?: boolean; rand?: () => number } = {}): DrawOp[] {
 	const ops: DrawOp[] = [];
 	// Stops early once `maxOps` is reached, so a huge request can't build a huge array.
 	const full = () => ops.length >= maxOps;
 	let s = firstStrokeId;
 	/** False if the outline was cut short (op budget or point cap), so a fill would leak out of it. */
-	const stroke = (pts: Point[], color: string, width: number): boolean => {
+	const rand = opts.rand ?? Math.random;
+	const stroke = (pts: Point[], color: string, width: number, closed = false): boolean => {
 		if (full()) return false;
-		const { dense, truncated } = densify(pts);
+		const res = densify(pts);
+		const truncated = res.truncated;
+		const dense = opts.freehand ? wobble(res.dense, closed && !truncated, rand) : res.dense;
+		if (opts.freehand) width = Math.max(2, width + Math.round(rand() * 2 - 1));
 		if (dense.length === 1) {
 			ops.push({ k: 'line', s, c: color, w: Math.round(width), p: [round1(dense[0][0]), round1(dense[0][1])] });
 			return true;
@@ -244,20 +290,20 @@ export function shapesToOps(shapes: readonly Shape[], firstStrokeId: number, max
 		const width = 'width' in sh && sh.width ? sh.width : 6;
 		switch (sh.type) {
 			case 'line':
-				stroke(sh.closed ? [...sh.points, sh.points[0]] : sh.points, color, width);
+				stroke(sh.closed ? [...sh.points, sh.points[0]] : sh.points, color, width, !!sh.closed);
 				break;
 			case 'polygon':
-				if (stroke([...sh.points, sh.points[0]], color, width) && sh.fill) fillAt(centroid(sh.points), sh.fill);
+				if (stroke([...sh.points, sh.points[0]], color, width, true) && sh.fill) fillAt(centroid(sh.points), sh.fill);
 				break;
 			case 'circle':
-				if (stroke(ellipsePoints(sh.cx, sh.cy, sh.r, sh.r), color, width) && sh.fill) fillAt([sh.cx, sh.cy], sh.fill);
+				if (stroke(ellipsePoints(sh.cx, sh.cy, sh.r, sh.r), color, width, true) && sh.fill) fillAt([sh.cx, sh.cy], sh.fill);
 				break;
 			case 'ellipse':
-				if (stroke(ellipsePoints(sh.cx, sh.cy, sh.rx, sh.ry), color, width) && sh.fill) fillAt([sh.cx, sh.cy], sh.fill);
+				if (stroke(ellipsePoints(sh.cx, sh.cy, sh.rx, sh.ry), color, width, true) && sh.fill) fillAt([sh.cx, sh.cy], sh.fill);
 				break;
 			case 'rect': {
 				const { x, y, w, h } = sh;
-				if (stroke([[x, y], [x + w, y], [x + w, y + h], [x, y + h], [x, y]], color, width) && sh.fill) fillAt([x + w / 2, y + h / 2], sh.fill);
+				if (stroke([[x, y], [x + w, y], [x + w, y + h], [x, y + h], [x, y]], color, width, true) && sh.fill) fillAt([x + w / 2, y + h / 2], sh.fill);
 				break;
 			}
 			case 'fill':
@@ -267,4 +313,13 @@ export function shapesToOps(shapes: readonly Shape[], firstStrokeId: number, max
 		s++;
 	}
 	return ops;
+}
+
+/** Small seeded PRNG (LCG), so the same seed redraws the exact same wobble. */
+export function seededRandom(seed: number): () => number {
+	let x = seed >>> 0 || 1;
+	return () => {
+		x = (Math.imul(x, 1664525) + 1013904223) >>> 0;
+		return x / 2 ** 32;
+	};
 }

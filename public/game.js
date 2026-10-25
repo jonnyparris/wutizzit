@@ -1333,7 +1333,7 @@ class GameClient {
 			sel.value = store.get('wutizzit:bot-model') || def;
 			const note = () => {
 				const m = models.find((x) => x.id === sel.value);
-				this.el.botNote.textContent = m?.paid ? 'Runs through AI Gateway. Third-party models share a daily budget.' : 'Runs on Workers AI. Sees with this model, draws with gpt-oss-120b.';
+				this.el.botNote.textContent = m?.paid ? 'Runs through AI Gateway. Third-party models share a daily budget.' : 'Runs on Workers AI. Draws and guesses with this model, checked by Clef.';
 			};
 			sel.addEventListener('change', note);
 			note();

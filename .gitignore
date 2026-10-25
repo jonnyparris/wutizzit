@@ -170,3 +170,4 @@ dist
 public/styles.css
 .wrangler/
 e2e/out/
+scripts/bot-bench/out/

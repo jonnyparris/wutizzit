@@ -1,9 +1,10 @@
 import { env, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { exports } from 'cloudflare:workers';
 import { describe, expect, it } from 'vitest';
-import { extractJson, responseText, scanCompactShapes } from '../src/bots/brain';
+import { distractorsFor, extractJson, responseText } from '../src/bots/brain';
+import { fitsMask, maskWord } from '../src/game/logic';
 import { encodePng, rasterize, visibleOps } from '../src/game/raster';
-import { cleanShapes, fromCompact, shapesToOps } from '../src/game/shapes';
+import { cleanShapes, fromCompact, seededRandom, shapesToOps, wobble } from '../src/game/shapes';
 
 const BASE = 'https://wutizzit.test';
 const worker = () => (exports as unknown as { default: Fetcher }).default;
@@ -63,20 +64,55 @@ async function humanRoom(name = 'Alice') {
 	return { roomId, client, playerId: joined.body.playerId as string };
 }
 
-/** A fake brain: guesses whatever `answer` says and draws a fixed picture. */
-function installFakeBrain(roomId: string, answer: { word?: string }) {
+interface FakeAnswers {
+	/** What the vision model guesses (after a wrong "nope"). */
+	word?: string;
+	/** What Clef picks from the shortlist, and how sure it is. */
+	clef?: { choice: string | null; p: number };
+	/** Clef's verdict on each successive drawing attempt (rank 1 and p >= 0.75 = recognised). */
+	verdicts?: { p: number; rank: number }[];
+	/** Delays (ms) for the careful (thinking) plan and for revisions, to order the race. */
+	carefulMs?: number;
+	reviseMs?: number;
+}
+
+/** A fake brain with call counters, so tests never touch real models. */
+function installFakeBrain(roomId: string, answer: FakeAnswers) {
+	const calls = { guess: 0, plan: 0, revise: 0, judge: 0, pick: 0, easiest: 0 };
+	// Each kind of attempt has its own fill colour, so tests can tell which one was shown.
+	const draft = cleanShapes([['circle', 400, 250, 100, 'black', 'yellow'], ['rect', 100, 100, 50, 50, 'red', null]]);
+	const careful = cleanShapes([['rect', 60, 60, 600, 300, 'black', 'green']]);
+	const revised = cleanShapes([['rect', 50, 50, 700, 400, 'black', 'blue']]);
 	return inRoom(roomId, (obj) => {
 		obj.brain = {
 			async guess() {
+				calls.guess++;
 				return answer.word ? ['nope', answer.word] : ['nope'];
 			},
-			async plan(_model: unknown, _word: string, onShapes?: (s: unknown[]) => void) {
-				const shapes = cleanShapes([['circle', 400, 250, 100, 'black', 'yellow'], ['rect', 100, 100, 50, 50, 'red', null]]);
-				onShapes?.(shapes);
-				return shapes;
+			async plan(model: { thinking?: boolean }) {
+				calls.plan++;
+				if (model.thinking !== true) return draft;
+				await sleep(answer.carefulMs ?? 300);
+				return careful;
+			},
+			async revise() {
+				calls.revise++;
+				await sleep(answer.reviseMs ?? 0);
+				return revised;
+			},
+			async judge() {
+				return { top: ['sun (40%)'], ...(answer.verdicts?.[calls.judge++] ?? { p: 0.9, rank: 1 }) };
+			},
+			async pick() {
+				calls.pick++;
+				return answer.clef ?? { choice: null, p: 0.2 };
+			},
+			async easiest(words: string[]) {
+				calls.easiest++;
+				return words.length - 1;
 			},
 		};
-	});
+	}).then(() => calls);
 }
 
 /** Makes every bot due now and runs the alarm, so bot steps happen without waiting seconds. */
@@ -130,6 +166,22 @@ describe('shapes and raster', () => {
 		expect([...png.slice(0, 8)]).toEqual([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 	});
 
+	it('draws freehand: wobbly but closed, and the same for the same seed', () => {
+		const square: [number, number][] = [];
+		for (let i = 0; i <= 40; i++) square.push([100 + i * 5, 100]);
+		const loop = wobble(square.concat(square.slice(1).map(([x]) => [300, x] as [number, number])), true, seededRandom(3));
+		// Start and end sit on the true outline (the wobble fades out), so fills can't leak.
+		expect(Math.hypot(loop[0][0] - loop.at(-1)![0], loop[0][1] - loop.at(-1)![1])).toBeLessThan(40);
+		const straight = wobble(square, false, seededRandom(1));
+		expect(straight.some(([, y]) => Math.abs(y - 100) > 0.3)).toBe(true);
+		expect(straight.every(([, y]) => Math.abs(y - 100) < 4)).toBe(true);
+		const shapes = cleanShapes([['circle', 400, 250, 100, 'black', 'yellow']]);
+		const a = shapesToOps(shapes, 1, Infinity, { freehand: true, rand: seededRandom(9) });
+		const b = shapesToOps(shapes, 1, Infinity, { freehand: true, rand: seededRandom(9) });
+		expect(a).toEqual(b);
+		expect(a).not.toEqual(shapesToOps(shapes, 1));
+	});
+
 	it('stops making ops at the budget, even for huge shapes', () => {
 		const zigzag = Array.from({ length: 200 }, (_, i) => [i % 2 ? 0 : 800, i % 2 ? 0 : 500]);
 		const shapes = cleanShapes(Array.from({ length: 80 }, () => ({ type: 'line', points: zigzag })));
@@ -164,22 +216,27 @@ describe('brain parsing', () => {
 		expect(extractJson('Sure! ```json\n{"guesses":["cat","dog",]}\n```')).toEqual({ guesses: ['cat', 'dog'] });
 	});
 
-	it('streams complete shapes out of a partial plan', () => {
-		const partial = '```json\n{"shapes": [["circle", 1, 2, 3, "black",], ["rect", 1, 2';
-		const first = scanCompactShapes(partial);
-		expect(first.shapes).toEqual([['circle', 1, 2, 3, 'black']]);
-		const rest = scanCompactShapes(`${partial}, 3, 4, "red", null]]}`, first.next);
-		expect(rest.shapes).toEqual([['rect', 1, 2, 3, 4, 'red', null]]);
+	it('picks distractors that never include the word', () => {
+		const d = distractorsFor('Cat', 10, ['cat', 'dog', 'CAT', 'sun', 'moon']);
+		expect(d.sort()).toEqual(['dog', 'moon', 'sun']);
+	});
+
+	it('matches words against the hint mask', () => {
+		expect(fitsMask('ice cream', maskWord('ice cream'))).toBe(true);
+		expect(fitsMask('icecream', maskWord('ice cream'))).toBe(false);
+		expect(fitsMask('house', maskWord('horse', [1]))).toBe(true);
+		expect(fitsMask('mouse', maskWord('horse', [1]))).toBe(true);
+		expect(fitsMask('mouse', maskWord('horse', [0]))).toBe(false);
 	});
 });
 
 describe('bots', () => {
 	it('only lets the host add bots, caps them, and lets one human play against a bot', async () => {
 		const { roomId, client } = await humanRoom();
-		client.send({ type: 'add-bot', model: '@cf/meta/llama-4-scout-17b-16e-instruct' });
+		client.send({ type: 'add-bot', model: 'google/gemini-2.5-flash' });
 		const s = await client.state((x) => x.players.length === 2);
 		const bot = s.players.find((p: any) => p.kind === 'bot');
-		expect(bot).toMatchObject({ username: 'Scout bot', connected: true });
+		expect(bot).toMatchObject({ username: 'Gemini bot', connected: true });
 		for (let i = 0; i < 5; i++) client.send({ type: 'add-bot' });
 		await client.next((m) => m.type === 'notice' && /Up to 4 bots/.test(m.text));
 
@@ -230,6 +287,87 @@ describe('bots', () => {
 		await client.state((x) => x.phase === 'drawing');
 		await stepBots(roomId); // plan + replay
 		await client.next((m) => m.type === 'draw' && m.op.k === 'fill', 5000);
+	});
+
+	/** Starts a game where the bot draws round 2, with the human's round 1 skipped. */
+	async function botTurn(answer: FakeAnswers) {
+		const { roomId, client } = await humanRoom();
+		const calls = await installFakeBrain(roomId, answer);
+		client.send({ type: 'add-bot' });
+		await client.state((x) => x.players.length === 2);
+		client.send({ type: 'start', settings: { maxRounds: 2, roundDuration: 60, wordChoiceCount: 3 } });
+		await client.state((x) => x.phase === 'choosing');
+		client.send({ type: 'choose', index: 0 });
+		await client.state((x) => x.phase === 'drawing');
+		await inRoom(roomId, (obj) => obj.endRound('test'));
+		await inRoom(roomId, (obj) => obj.nextRoundOrFinish());
+		await stepBots(roomId); // choose
+		return { roomId, client, calls };
+	}
+
+	it('picks the easiest word with Clef', async () => {
+		const { roomId, calls } = await botTurn({});
+		await sleep(50);
+		expect(calls.easiest).toBe(1);
+		await inRoom(roomId, (obj) => {
+			expect(obj.state.round.word).toBe(obj.state.round.choices.at(-1));
+		});
+	});
+
+	it('redraws when Clef cannot recognise the drawing, and shows the better one', async () => {
+		const { roomId, client, calls } = await botTurn({ verdicts: [{ p: 0.05, rank: 9 }, { p: 0.9, rank: 1 }] });
+		await client.state((x) => x.phase === 'drawing' && x.round.drawerId !== x.you.id);
+		await stepBots(roomId);
+		const fill = await client.next((m) => m.type === 'draw' && m.op.k === 'fill', 5000);
+		expect(calls.revise).toBe(1);
+		expect(fill.op.c).toBe('#3b82f6'); // the revised drawing (blue), not the first (yellow)
+	});
+
+	it('keeps the best attempt when every redraw is still unclear', async () => {
+		// Draft, two revisions, then the careful plan: all unclear, the draft scores best.
+		const { roomId, client, calls } = await botTurn({ verdicts: [{ p: 0.6, rank: 1 }, { p: 0.1, rank: 6 }, { p: 0.2, rank: 4 }, { p: 0.3, rank: 2 }] });
+		await client.state((x) => x.phase === 'drawing' && x.round.drawerId !== x.you.id);
+		await stepBots(roomId);
+		const fill = await client.next((m) => m.type === 'draw' && m.op.k === 'fill', 5000);
+		expect(calls.revise).toBe(2);
+		expect(calls.plan).toBe(2); // fast draft + careful plan
+		expect(fill.op.c).toBe('#facc15');
+	});
+
+	it('uses the careful plan when it beats the revision to a clear drawing', async () => {
+		const { roomId, client } = await botTurn({ verdicts: [{ p: 0.1, rank: 5 }, { p: 0.85, rank: 1 }], carefulMs: 0, reviseMs: 400 });
+		await client.state((x) => x.phase === 'drawing' && x.round.drawerId !== x.you.id);
+		await stepBots(roomId);
+		const fill = await client.next((m) => m.type === 'draw' && m.op.k === 'fill', 5000);
+		expect(fill.op.c).toBe('#22c55e');
+	});
+
+	it('shows a clear first draft straight away', async () => {
+		const { roomId, client, calls } = await botTurn({ verdicts: [{ p: 0.9, rank: 1 }] });
+		await client.state((x) => x.phase === 'drawing' && x.round.drawerId !== x.you.id);
+		await stepBots(roomId);
+		const fill = await client.next((m) => m.type === 'draw' && m.op.k === 'fill', 5000);
+		expect(fill.op.c).toBe('#facc15');
+		expect(calls.revise).toBe(0);
+	});
+
+	it('guesses with Clef alone when it is confident, skipping the vision model', async () => {
+		const { roomId, client } = await humanRoom();
+		const answer: FakeAnswers = {};
+		const calls = await installFakeBrain(roomId, answer);
+		client.send({ type: 'add-bot' });
+		await client.state((x) => x.players.length === 2);
+		client.send({ type: 'start', settings: { maxRounds: 2, roundDuration: 60 } });
+		const s = await client.state((x) => x.phase === 'choosing');
+		answer.clef = { choice: s.round.choices[0], p: 0.8 };
+		client.send({ type: 'choose', index: 0 });
+		await client.state((x) => x.phase === 'drawing');
+		for (let i = 0; i < 4; i++) client.send({ type: 'draw', op: { k: 'line', s: i + 1, c: '#000000', w: 4, p: [10, 10, 200, 200] } });
+		await sleep(50);
+		await stepBots(roomId);
+		await client.next((m) => m.type === 'chat' && m.msg.kind === 'correct');
+		expect(calls.pick).toBe(1);
+		expect(calls.guess).toBe(0);
 	});
 
 	it('leaves with the last human', async () => {

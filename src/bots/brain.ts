@@ -1,8 +1,12 @@
-// AI bot "brain": asks a vision model what the drawing is, and asks a model to plan a drawing.
-// Every model is called through the Workers AI binding. Third-party models (OpenAI, Anthropic,
-// Google) route through AI Gateway with Unified Billing, so no provider keys are needed.
+// AI bot "brain". Bots use vision models, so a bot can see what it drew as well as what others draw.
+// Clef (a cheap multimodal decision model on Workers AI) does the quick judgement calls: picking
+// an easy word, checking whether a drawing reads as the word before it is shown, and ranking
+// likely answers when guessing. The bigger model is only called when Clef isn't sure.
+// Every model goes through the Workers AI binding. Third-party models (OpenAI, Anthropic, Google)
+// route through AI Gateway with Unified Billing, so no provider keys are needed.
 
 import { cleanShapes, COMPACT_SHAPES_HELP, type Shape } from '../game/shapes';
+import { WORDS } from '../utils/words';
 
 export interface BotModel {
 	id: string;
@@ -12,46 +16,37 @@ export interface BotModel {
 	provider: 'workers-ai' | 'openai' | 'anthropic' | 'google';
 	/** Third-party models cost real money: they count against the daily paid budget. */
 	paid: boolean;
-	/** Text model used to plan drawings, when the vision model is a poor artist. */
-	drawModel?: string;
 	reasoningEffort?: 'low' | 'medium' | 'high';
+	/** Workers AI hybrid models: false turns off the thinking phase (DeepSeek: ~4s instead of ~15s). */
+	thinking?: boolean;
+	/**
+	 * Drawing prompt. "features" asks the model to name the word's most iconic features first, which
+	 * helped GPT and Claude a lot; DeepSeek and Gemini drew better with the plain prompt.
+	 */
+	prompt: 'plain' | 'features';
 }
 
-// Workers AI vision models guess well but draw poorly, so their bots plan drawings with
-// gpt-oss-120b (low reasoning effort: first shape in ~1.5s). Third-party models do both.
-const WAI_ARTIST = { drawModel: '@cf/openai/gpt-oss-120b', reasoningEffort: 'low' } as const;
-
+// Only models that can see (to check and fix their own drawings) and that drew recognisably in
+// scripts/bot-bench (Clef-judged, 12-28 words) are offered.
 export const BOT_MODELS: readonly BotModel[] = [
 	{
-		id: '@cf/mistralai/mistral-small-3.1-24b-instruct',
-		label: 'Mistral Small 3.1',
-		short: 'Mistral',
+		id: '@cf/deepseek-ai/deepseek-v4.1-flash-1017',
+		label: 'DeepSeek V4.1 Flash',
+		short: 'DeepSeek',
 		provider: 'workers-ai',
 		paid: false,
-		...WAI_ARTIST,
+		thinking: false,
+		prompt: 'plain',
 	},
-	{
-		id: '@cf/meta/llama-4-scout-17b-16e-instruct',
-		label: 'Llama 4 Scout',
-		short: 'Scout',
-		provider: 'workers-ai',
-		paid: false,
-		...WAI_ARTIST,
-	},
-	{
-		id: '@cf/meta/llama-3.2-11b-vision-instruct',
-		label: 'Llama 3.2 Vision',
-		short: 'Llama',
-		provider: 'workers-ai',
-		paid: false,
-		...WAI_ARTIST,
-	},
-	{ id: 'openai/gpt-5.4-mini', label: 'GPT-5.4 mini', short: 'GPT', provider: 'openai', paid: true },
-	{ id: 'anthropic/claude-haiku-4.5', label: 'Claude Haiku 4.5', short: 'Claude', provider: 'anthropic', paid: true },
-	{ id: 'google/gemini-2.5-flash', label: 'Gemini 2.5 Flash', short: 'Gemini', provider: 'google', paid: true },
+	{ id: 'google/gemini-2.5-flash', label: 'Gemini 2.5 Flash', short: 'Gemini', provider: 'google', paid: true, reasoningEffort: 'low', prompt: 'plain' },
+	{ id: 'openai/gpt-5.4-mini', label: 'GPT-5.4 mini', short: 'GPT', provider: 'openai', paid: true, prompt: 'features' },
+	{ id: 'anthropic/claude-haiku-4.5', label: 'Claude Haiku 4.5', short: 'Claude', provider: 'anthropic', paid: true, prompt: 'features' },
 ];
 
 export const DEFAULT_BOT_MODEL = BOT_MODELS[0].id;
+
+/** Clef-flash: ~0.5s and ~600 input tokens (about $0.00002) per judgement, no output tokens billed. */
+export const CLEF_MODEL = '@cf/cloudflare/clef-flash';
 
 export const findModel = (id: unknown): BotModel | undefined => BOT_MODELS.find((m) => m.id === id);
 
@@ -60,11 +55,36 @@ export interface BrainEnv {
 	AI_GATEWAY_ID?: string;
 }
 
+export interface Judgement {
+	/** Probability Clef gives the target word, among the word and the distractors. */
+	p: number;
+	/** 1 = Clef's top pick was the target word. */
+	rank: number;
+	/** Clef's top three readings, e.g. ["penguin 41%", ...], fed back to the artist when revising. */
+	top: string[];
+}
+
+/**
+ * Clef is a lenient judge: against 60 random words it often ranks a weak drawing first. Requiring
+ * a clear probability as well keeps the redraw loop going until the drawing really reads well.
+ */
+export const RECOGNISED_P = 0.75;
+export const isRecognised = (v: Judgement) => v.rank === 1 && v.p >= RECOGNISED_P;
+
 /** What the room needs from a brain. Tests swap in a fake. */
 export interface Brain {
+	/** Free-form guesses from the vision model. */
 	guess(model: BotModel, input: GuessInput): Promise<string[]>;
-	/** Plans a drawing. `onShapes` receives shapes as soon as they're parsed, so drawing can start early. */
-	plan(model: BotModel, word: string, onShapes?: (shapes: Shape[]) => boolean | void): Promise<Shape[]>;
+	/** Plans a drawing of `word` as shapes. */
+	plan(model: BotModel, word: string): Promise<Shape[]>;
+	/** Looks at its own drawing (`png`) plus how Clef misread it, and returns an improved drawing. */
+	revise(model: BotModel, word: string, shapes: Shape[], png: string, misreadAs: string[]): Promise<Shape[]>;
+	/** Clef: how clearly does `png` read as `word`, against distractor words? */
+	judge(png: string, word: string): Promise<Judgement>;
+	/** Clef: which of `options` is the drawing? `null` when it's most likely none of them. */
+	pick(png: string, options: string[]): Promise<{ choice: string | null; p: number }>;
+	/** Clef: index of the word that's easiest to draw recognisably. */
+	easiest(words: string[]): Promise<number>;
 }
 
 export interface GuessInput {
@@ -78,6 +98,9 @@ export interface GuessInput {
 }
 
 const TIMEOUT_MS = 30_000;
+const CLEF_TIMEOUT_MS = 10_000;
+const FAST_TIMEOUT_MS = 15_000;
+const NONE_OF_THESE = 'something else';
 
 function withTimeout<T>(p: Promise<T>, ms = TIMEOUT_MS): Promise<T> {
 	return new Promise((resolve, reject) => {
@@ -87,6 +110,22 @@ function withTimeout<T>(p: Promise<T>, ms = TIMEOUT_MS): Promise<T> {
 			(e) => (clearTimeout(t), reject(e)),
 		);
 	});
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Workers AI error 3021 is the per-model, per-minute request limit: worth one retry. */
+const isRateLimited = (err: unknown) => /\b3021\b|rate limit/i.test(String(err));
+
+/** Runs a binding call, retrying once after a short pause if the model is rate limited. */
+async function runWithRetry<T>(call: () => Promise<T>, ms = TIMEOUT_MS): Promise<T> {
+	try {
+		return await withTimeout(call(), ms);
+	} catch (err) {
+		if (!isRateLimited(err)) throw err;
+		await sleep(1500);
+		return withTimeout(call(), ms);
+	}
 }
 
 /** Pulls the assistant text out of the three response shapes the binding returns. */
@@ -122,119 +161,93 @@ export function extractJson(text: string): unknown {
 	return null;
 }
 
-/**
- * Pulls complete shape arrays out of a partial `{"shapes":[[...],[...],...` stream. Returns the
- * shapes found from `from` onwards and where to resume. Only depth-2 arrays count as shapes.
- */
-export function scanCompactShapes(buf: string, from = 0): { shapes: unknown[][]; next: number } {
-	const start = buf.indexOf('[', buf.indexOf('"shapes"') >= 0 ? buf.indexOf('"shapes"') : 0);
-	if (start < 0) return { shapes: [], next: from };
-	let i = Math.max(from, start + 1);
-	const shapes: unknown[][] = [];
-	let depth = 0;
-	let inStr = false;
-	let begin = -1;
-	let resume = i;
-	for (; i < buf.length; i++) {
-		const c = buf[i];
-		if (inStr) {
-			if (c === '\\') i++;
-			else if (c === '"') inStr = false;
-			continue;
-		}
-		if (c === '"') inStr = true;
-		else if (c === '[') {
-			if (depth === 0) begin = i;
-			depth++;
-		} else if (c === ']') {
-			if (depth === 0) break; // End of the shapes list.
-			depth--;
-			if (depth === 0 && begin >= 0) {
-				try {
-					// Models often leave trailing commas (`"black",]`): tolerate them.
-					const v = JSON.parse(buf.slice(begin, i + 1).replace(/,\s*\]/g, ']'));
-					if (Array.isArray(v)) shapes.push(v);
-				} catch {
-					// Malformed shape: skip it.
-				}
-				begin = -1;
-				resume = i + 1;
-			}
-		}
+/** Random distractor words for judging a drawing, never the word itself. */
+export function distractorsFor(word: string, n = 60, pool: readonly string[] = WORDS): string[] {
+	const key = word.toLowerCase();
+	const others = pool.filter((w) => w.toLowerCase() !== key);
+	for (let i = others.length - 1; i > 0; i--) {
+		const j = Math.floor(Math.random() * (i + 1));
+		[others[i], others[j]] = [others[j], others[i]];
 	}
-	return { shapes, next: resume };
+	return others.slice(0, n);
 }
 
-/**
- * Reads an SSE text stream from the AI binding, yielding text deltas in either response shape.
- * Stops at `deadline` even if the stream stalls, and always cancels the upstream generation.
- */
-export async function* streamText(stream: ReadableStream<Uint8Array>, deadline = Infinity): AsyncGenerator<string> {
-	const reader = stream.pipeThrough(new TextDecoderStream()).getReader();
-	let buf = '';
-	let timer: ReturnType<typeof setTimeout> | null = null;
-	try {
-		for (;;) {
-			const wait = deadline - Date.now();
-			if (wait <= 0) return;
-			const timeout = new Promise<{ value: undefined; done: true }>((resolve) => {
-				timer = setTimeout(() => resolve({ value: undefined, done: true }), wait);
-			});
-			const { value, done } = await Promise.race([reader.read(), timeout]);
-			if (timer) clearTimeout(timer);
-			if (done) break;
-			buf += value;
-			let nl: number;
-			while ((nl = buf.indexOf('\n')) >= 0) {
-				const line = buf.slice(0, nl).trim();
-				buf = buf.slice(nl + 1);
-				if (!line.startsWith('data:')) continue;
-				const data = line.slice(5).trim();
-				if (data === '[DONE]') return;
-				try {
-					const j = JSON.parse(data);
-					// Newer models send OpenAI-style deltas and a lossy `response` copy (numbers go missing): prefer the delta.
-					const delta = j.choices?.[0]?.delta?.content;
-					const t = typeof delta === 'string' ? delta : (j.response ?? '');
-					if (typeof t === 'string' && t) yield t;
-				} catch {
-					// Keep-alive or partial line.
-				}
-			}
-		}
-	} finally {
-		if (timer) clearTimeout(timer);
-		reader.cancel().catch(() => {});
+/** One chat call with an optional PNG, in whichever message format the provider wants. */
+export async function runModel(env: BrainEnv, model: BotModel, system: string, text: string, png?: string, maxTokens = 400): Promise<string> {
+	let messages: unknown[];
+	if (model.provider === 'anthropic') {
+		// Anthropic models take the native Messages format through the binding.
+		const content: unknown[] = [{ type: 'text', text }];
+		if (png) content.push({ type: 'image', source: { type: 'base64', media_type: 'image/png', data: png } });
+		messages = [{ role: 'user', content }];
+	} else {
+		const content: unknown[] = [{ type: 'text', text }];
+		if (png) content.push({ type: 'image_url', image_url: { url: `data:image/png;base64,${png}` } });
+		messages = [
+			{ role: 'system', content: system },
+			{ role: 'user', content },
+		];
 	}
+	const input: Record<string, unknown> = { messages };
+	if (model.provider === 'anthropic') {
+		input.system = system;
+		input.max_tokens = maxTokens;
+	} else if (model.provider === 'workers-ai') {
+		input.max_tokens = maxTokens * 4; // Reasoning models spend tokens thinking first.
+		if (model.thinking === false) input.chat_template_kwargs = { thinking: false };
+	}
+	if (model.reasoningEffort && model.provider !== 'anthropic') input.reasoning_effort = model.reasoningEffort;
+	const options = model.provider === 'workers-ai' ? undefined : { gateway: { id: env.AI_GATEWAY_ID || 'default' } };
+	// Without thinking, a reply takes a few seconds; a slow one is stuck, so give up sooner.
+	const out = await runWithRetry(() => (env.AI.run as any)(model.id, input, options), model.thinking === false ? FAST_TIMEOUT_MS : TIMEOUT_MS);
+	return responseText(out);
+}
+
+const ARTIST = 'You draw simple, recognisable pictures for a Pictionary game using vector shapes. Reply with JSON only, no prose.';
+
+function planPrompt(word: string, style: BotModel['prompt']): string {
+	if (style === 'features') {
+		return `Draw "${word}" so other players can guess it quickly. Never write letters, numbers or words.
+${COMPACT_SHAPES_HELP}
+First decide the 2-4 most iconic visual features someone would draw to make "${word}" unmistakable (e.g. giraffe: very long neck, spots, small horns), then draw them clearly and big. Use 8-25 shapes, centred, filling most of the canvas. Big outline shapes first, then details.
+Reply as {"features":["..."],"shapes":[[...],[...]]}.`;
+	}
+	return `Draw "${word}" so other players can guess it. Never write letters, numbers or words.
+${COMPACT_SHAPES_HELP}
+Use 8-20 shapes. Make it big and centred. Big outline shapes first, then details. Reply as {"shapes":[[...],[...]]}.`;
+}
+
+function revisePrompt(word: string, shapes: Shape[], misreadAs: string[]): string {
+	return `This image is your drawing of "${word}" for a Pictionary game. A viewer thought it looked most like: ${misreadAs.join(', ')}.
+Improve it so it obviously reads as "${word}": exaggerate its most iconic features, fix proportions, remove anything confusing. Never write letters or words.
+${COMPACT_SHAPES_HELP}
+Your current shapes (as objects): ${JSON.stringify(shapes).slice(0, 6000)}
+Reply with the complete improved drawing as {"shapes":[[...],[...]]}.`;
 }
 
 export function createBrain(env: BrainEnv): Brain {
-	const run = async (model: BotModel, system: string, text: string, png?: string, maxTokens = 400): Promise<string> => {
-		let messages: unknown[];
-		if (model.provider === 'anthropic') {
-			// Anthropic models take the native Messages format through the binding.
-			const content: unknown[] = [{ type: 'text', text }];
-			if (png) content.push({ type: 'image', source: { type: 'base64', media_type: 'image/png', data: png } });
-			messages = [{ role: 'user', content }];
-		} else {
-			const content: unknown[] = [{ type: 'text', text }];
-			if (png) content.push({ type: 'image_url', image_url: { url: `data:image/png;base64,${png}` } });
-			messages = [
-				{ role: 'system', content: system },
-				{ role: 'user', content },
-			];
-		}
-		const input: Record<string, unknown> = { messages };
-		if (model.provider === 'anthropic') {
-			input.system = system;
-			input.max_tokens = maxTokens;
-		} else if (model.provider === 'workers-ai') {
-			input.max_tokens = maxTokens * 4; // Reasoning models spend tokens thinking first.
-		}
-		const options = model.provider === 'workers-ai' ? undefined : { gateway: { id: env.AI_GATEWAY_ID || 'default' } };
-		const out = await withTimeout((env.AI.run as any)(model.id, input, options));
-		return responseText(out);
+	const run = (model: BotModel, system: string, text: string, png?: string, maxTokens = 400) =>
+		runModel(env, model, system, text, png, maxTokens);
+
+	const clef = async (input: { state: unknown; questions: Record<string, unknown>; png?: string }) => {
+		const out = (await runWithRetry(
+			() =>
+				(env.AI.run as any)(CLEF_MODEL, {
+					model: 'clef-flash',
+					state: input.state,
+					questions: input.questions,
+					...(input.png ? { images: [{ content_type: 'image/png', base64: input.png }] } : {}),
+				}),
+			CLEF_TIMEOUT_MS,
+		)) as { answers?: Record<string, { choice?: string; probabilities?: Record<string, number> }> };
+		return out.answers ?? {};
 	};
+	const SKETCH = 'A quick sketch from a Pictionary-style drawing game.';
+	const choice = (instructions: string, options: string[]) => ({
+		type: 'choice',
+		instructions,
+		criteria: Object.fromEntries(options.map((o) => [o, null])),
+	});
 
 	return {
 		async guess(model, { png, hint, letters, tried }) {
@@ -250,49 +263,49 @@ Reply as {"guesses":["best","second","third"]}: up to 3 single nouns that fit th
 				: [];
 		},
 
-		async plan(model, word, onShapes) {
-			const system = 'You draw simple, recognisable pictures for a Pictionary game using vector shapes. Reply with JSON only, no prose.';
-			const text = `Draw "${word}" so other players can guess it. Never write letters, numbers or words.
-${COMPACT_SHAPES_HELP}
-Use 8-20 shapes. Make it big and centred. Big outline shapes first, then details. Reply as {"shapes":[[...],[...]]}.`;
-			if (model.provider !== 'workers-ai' || !onShapes) {
-				const shapes = cleanShapes(extractJson(await run(model, system, text, undefined, 900)));
-				onShapes?.(shapes);
-				return shapes;
-			}
-			// Workers AI streams: draw each shape as soon as it's complete.
-			const out = (await withTimeout(
-				(env.AI.run as any)(model.drawModel ?? model.id, {
-					messages: [
-						{ role: 'system', content: system },
-						{ role: 'user', content: text },
-					],
-					max_tokens: 3600,
-					stream: true,
-					...(model.reasoningEffort ? { reasoning_effort: model.reasoningEffort } : {}),
-				}),
-			)) as ReadableStream<Uint8Array>;
-			let buf = '';
-			let next = 0;
-			const all: Shape[] = [];
-			// Small models sometimes loop on one shape; drop exact repeats.
-			const seen = new Set<string>();
-			for await (const delta of streamText(out, Date.now() + TIMEOUT_MS)) {
-				buf += delta;
-				const found = scanCompactShapes(buf, next);
-				next = found.next;
-				const shapes = cleanShapes(found.shapes).filter((sh) => {
-					const key = JSON.stringify(sh);
-					return !seen.has(key) && !!seen.add(key);
-				});
-				if (shapes.length) {
-					all.push(...shapes);
-					// The room returns false once the turn is over: stop generating.
-					if (onShapes(shapes) === false) break;
-				}
-				if (all.length >= 40) break;
-			}
-			return all;
+		async plan(model, word) {
+			return cleanShapes(extractJson(await run(model, ARTIST, planPrompt(word, model.prompt), undefined, 1500)));
+		},
+
+		async revise(model, word, shapes, png, misreadAs) {
+			return cleanShapes(extractJson(await run(model, ARTIST, revisePrompt(word, shapes, misreadAs), png, 1500)));
+		},
+
+		async judge(png, word) {
+			const answers = await clef({ state: SKETCH, png, questions: { what: choice('What is this sketch a drawing of?', [word, ...distractorsFor(word)]) } });
+			const probs = Object.entries(answers.what?.probabilities ?? {}).sort((a, b) => b[1] - a[1]);
+			const rank = probs.findIndex(([w]) => w === word) + 1;
+			return {
+				p: answers.what?.probabilities?.[word] ?? 0,
+				rank: rank || probs.length + 1,
+				top: probs.slice(0, 3).map(([w, p]) => `${w} (${Math.round(p * 100)}%)`),
+			};
+		},
+
+		async pick(png, options) {
+			const list = [...new Set(options)].filter((o) => o !== NONE_OF_THESE).slice(0, 254);
+			if (!list.length) return { choice: null, p: 0 };
+			const answers = await clef({ state: SKETCH, png, questions: { what: choice('What is this sketch a drawing of?', [...list, NONE_OF_THESE]) } });
+			const probs = Object.entries(answers.what?.probabilities ?? {}).sort((a, b) => b[1] - a[1]);
+			const [top, p] = probs[0] ?? [NONE_OF_THESE, 0];
+			return top === NONE_OF_THESE ? { choice: null, p } : { choice: top, p };
+		},
+
+		async easiest(words) {
+			if (words.length < 2) return 0;
+			const ids = words.map((_, i) => `w${i}`);
+			const answers = await clef({
+				state: { words },
+				questions: {
+					easiest: {
+						type: 'choice',
+						instructions: 'Which of these words is easiest to draw as a quick sketch that other people would recognise?',
+						criteria: Object.fromEntries(ids.map((id, i) => [id, words[i]])),
+					},
+				},
+			});
+			const i = ids.indexOf(answers.easiest?.choice ?? '');
+			return i >= 0 ? i : 0;
 		},
 	};
 }
