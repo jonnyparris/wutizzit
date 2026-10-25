@@ -61,6 +61,8 @@ const BOT_CONFIDENT = 0.45;
 /** Redraws allowed when Clef can't recognise a bot's drawing, and the time limit for preparing it. */
 const BOT_REVISIONS = 2;
 const BOT_PREP_MS = 25_000;
+/** A drawing needs at least this long on screen to be worth starting. */
+const BOT_MIN_SHOW_MS = 10_000;
 /** Per-room daily AI calls, on top of the global budget in GlobalStats, so one room can't drain it. */
 // A bot turn costs up to 4 model calls (draft, careful plan, 2 redraws) plus a few Clef checks;
 // a guess is one Clef call, plus a vision call when Clef isn't sure.
@@ -1129,8 +1131,10 @@ export class GameRoomObject extends DurableObject<Env> {
 			art = await prepareDrawing(this.brain, model, s.round!.word!, {
 				active: stillDrawing,
 				spend: (kind) => this.spendAi(botId, kind),
-				// Leave most of a short round for the replay and for guessing.
+				// Leave most of a short round for the replay and for guessing...
 				deadline: Date.now() + Math.min(BOT_PREP_MS, Math.max(5_000, ((s.deadline ?? Date.now()) - Date.now()) * 0.4)),
+				// ...but with nothing to show yet, wait as long as a short replay still fits.
+				giveUpAt: (s.deadline ?? Date.now()) - BOT_MIN_SHOW_MS,
 				maxRevisions: BOT_REVISIONS,
 			});
 			if (art) console.log(JSON.stringify({ msg: 'bot drew', model: model.id, source: art.source, attempts: art.attempts, p: art.verdict?.p ?? null }));

@@ -298,7 +298,7 @@ Reply as {"guesses":["best","second","third"]}: up to 3 single nouns that fit th
 			const answers = await clef({ state: SKETCH, png, questions: { what: choice('What is this sketch a drawing of?', [...list, NONE_OF_THESE]) } });
 			const probs = Object.entries(answers.what?.probabilities ?? {}).sort((a, b) => b[1] - a[1]);
 			if (!probs.length) throw new Error('clef returned no probabilities');
-			const [top, p] = probs[0] ?? [NONE_OF_THESE, 0];
+			const [top, p] = probs[0];
 			return top === NONE_OF_THESE ? { choice: null, p } : { choice: top, p };
 		},
 

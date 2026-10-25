@@ -32,8 +32,13 @@ export interface ArtistHooks {
 	active(): boolean;
 	/** Reserves budget for one call. */
 	spend(kind: AiSpendKind): Promise<boolean>;
-	/** Hard limit (ms since epoch): whatever is best by then is used. */
+	/** Stop improving (ms since epoch): whatever is best by then is used. */
 	deadline: number;
+	/**
+	 * With nothing drawable yet, keep waiting for the draft or careful plan until this time (ms since
+	 * epoch). Defaults to `deadline`. The game sets it so the replay still fits in the round.
+	 */
+	giveUpAt?: number;
 	maxRevisions: number;
 }
 
@@ -45,8 +50,10 @@ export const isHybrid = (m: BotModel) => m.provider === 'workers-ai' && m.thinki
 
 export async function prepareDrawing(brain: Brain, model: BotModel, word: string, hooks: ArtistHooks): Promise<Artwork | null> {
 	const kind: AiSpendKind = model.paid ? 'paid' : 'free';
-	const left = () => hooks.deadline - Date.now();
-	/** Resolves to `fallback` at the deadline instead of waiting on a slow call. */
+	const giveUpAt = Math.max(hooks.deadline, hooks.giveUpAt ?? hooks.deadline);
+	/** Time left to improve; once something is drawable, that's the soft deadline, else the hard one. */
+	const left = () => (best ? hooks.deadline : giveUpAt) - Date.now();
+	/** Resolves to `fallback` when time is up instead of waiting on a slow call. */
 	const beforeDeadline = <T>(p: Promise<T>, fallback: T): Promise<T> => {
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		return Promise.race([p, new Promise<T>((r) => (timer = setTimeout(() => r(fallback), Math.max(0, left()))))]).finally(() => {
@@ -78,7 +85,9 @@ export async function prepareDrawing(brain: Brain, model: BotModel, word: string
 	if (!(await hooks.spend(kind))) return null;
 	const careful = isHybrid(model) && (await hooks.spend(kind)) ? plan({ ...model, thinking: true }) : null;
 
-	const draft = await consider(await beforeDeadline(plan(model), []), 'draft');
+	const draftCall = plan(model);
+	const draftShapes = await beforeDeadline(draftCall, null);
+	const draft = draftShapes ? await consider(draftShapes, 'draft') : null;
 	if (done(draft)) return draft;
 
 	// The loop removes each result as it handles it. (Removing on settle would drop a result that
@@ -102,6 +111,8 @@ export async function prepareDrawing(brain: Brain, model: BotModel, word: string
 		add(brain.revise(model, word, base.shapes, base.png, base.verdict?.top ?? []), 'revision');
 	};
 
+	// A draft that missed the soft deadline may still arrive before the hard one.
+	if (!draftShapes) add(draftCall, 'draft');
 	if (careful) add(careful, 'careful');
 	await revise();
 	while (pending.size && hooks.active() && left() > 0) {

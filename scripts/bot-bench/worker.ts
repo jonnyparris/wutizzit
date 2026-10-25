@@ -13,7 +13,9 @@ export default {
 			const art = await prepareDrawing(createBrain(env), model, word, {
 				active: () => true,
 				spend: async () => true,
-				deadline: Date.now() + 25_000,
+				// Same timing as the game for a round of `d` seconds (default 60).
+				deadline: Date.now() + Math.min(25_000, Math.max(5_000, Number(u.searchParams.get('d') ?? 60) * 400)),
+				giveUpAt: Date.now() + Number(u.searchParams.get('d') ?? 60) * 1000 - 10_000,
 				maxRevisions: Number(u.searchParams.get('r') ?? 2),
 			});
 			if (!art) return Response.json({ word, model: id, error: 'no drawing' });

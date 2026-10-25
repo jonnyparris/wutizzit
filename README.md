@@ -74,7 +74,8 @@ In the lobby, the host clicks **Add bot** and picks a model. A room can have up 
   - A global daily budget caps all rooms together. The defaults are 20,000 Workers AI calls, 1,500
     third-party calls and 100,000 Clef calls (`AI_DAILY_*_CALLS` in `wrangler.jsonc`).
   - When a bot's model runs out of budget, the bot sits out: it stops guessing and skips its
-    drawing turns. When Clef runs out, bots carry on without the checks.
+    drawing turns. When Clef runs out, bots carry on without the checks, and every guess uses the
+    model (still at most 8 guesses per bot per round).
 
 **How the models were picked:** `scripts/bot-bench/` runs the models on the same words. It renders
 each drawing the way the game does and asks Clef what it shows, out of the word and 60 random

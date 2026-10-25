@@ -75,6 +75,12 @@ describe('prepareDrawing', () => {
 		expect(fillOf(art?.shapes)).toBe('#ef4444');
 	});
 
+	it('still shows a slow draft that misses the soft deadline', async () => {
+		const { brain } = fakeBrain({ draft: { shapes: shape('red'), ms: 400 }, verdicts: { '#ef4444': { p: 0.3, rank: 2 } } });
+		const art = await prepareDrawing(brain, gemini, 'x', hooks({ deadline: Date.now() + 100, giveUpAt: Date.now() + 2_000, maxRevisions: 0 }));
+		expect(fillOf(art?.shapes)).toBe('#ef4444');
+	});
+
 	it('never swaps a judged attempt for one Clef failed to judge', async () => {
 		// The revision (blue) has no verdict: judge throws for it.
 		const { brain } = fakeBrain({ draft: { shapes: shape('red') }, revise: { shapes: shape('blue') }, verdicts: { '#ef4444': { p: 0.6, rank: 1 } } });

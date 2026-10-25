@@ -24,7 +24,7 @@ async function worker() {
 		const t0 = Date.now();
 		let res;
 		try {
-			res = await (await fetch(`${BENCH}/?m=${encodeURIComponent(job.m)}&w=${encodeURIComponent(job.w)}&r=${redraws}`)).json();
+			res = await (await fetch(`${BENCH}/?m=${encodeURIComponent(job.m)}&w=${encodeURIComponent(job.w)}&r=${redraws}&d=${process.env.ROUND_SECONDS ?? 60}`)).json();
 		} catch (err) {
 			res = { error: String(err) };
 		}

@@ -425,6 +425,41 @@ describe('bot budget', () => {
 		await client.next((m) => m.type === 'chat' && /couldn't draw this turn/.test(m.msg.text));
 	});
 
+	it('keeps a bot playing when only Clef is out of budget', async () => {
+		const { roomId, client } = await humanRoom();
+		const calls = await installFakeBrain(roomId, {});
+		client.send({ type: 'add-bot' });
+		await client.state((x) => x.players.length === 2);
+		await inRoom(roomId, (obj) => {
+			obj.state.aiSpend = { day: new Date().toISOString().slice(0, 10), free: 0, paid: 0, clef: 5000 };
+		});
+		client.send({ type: 'start', settings: { maxRounds: 2, roundDuration: 60 } });
+		await client.state((x) => x.phase === 'choosing');
+		client.send({ type: 'choose', index: 0 });
+		await client.state((x) => x.phase === 'drawing');
+		await inRoom(roomId, (obj) => obj.endRound('test'));
+		await inRoom(roomId, (obj) => obj.nextRoundOrFinish());
+		await stepBots(roomId); // choose (Clef unavailable: random word)
+		await client.state((x) => x.phase === 'drawing' && x.round.drawerId !== x.you.id);
+		await stepBots(roomId); // draw without Clef checks
+		await client.next((m) => m.type === 'draw' && m.op.k === 'fill', 5000);
+		expect(calls.easiest).toBe(0);
+		expect(client.messages.some((m) => m.type === 'chat' && /out of energy/.test(m.msg.text))).toBe(false);
+	});
+
+	it('never lets two concurrent spends take the last slot', async () => {
+		const { roomId, client } = await humanRoom();
+		client.send({ type: 'add-bot' });
+		const s = await client.state((x) => x.players.length === 2);
+		const botId = s.players.find((p: any) => p.kind === 'bot').id;
+		await inRoom(roomId, async (obj) => {
+			obj.state.aiSpend = { day: new Date().toISOString().slice(0, 10), free: 1499, paid: 0, clef: 0 };
+			const results = await Promise.all([obj.spendAi(botId, 'free'), obj.spendAi(botId, 'free')]);
+			expect(results.filter(Boolean)).toHaveLength(1);
+			expect(obj.state.aiSpend.free).toBe(1500);
+		});
+	});
+
 	it('does not run bots with nobody watching, and shifts their timers on pause', async () => {
 		const { roomId, client, playerId } = await humanRoom();
 		await installFakeBrain(roomId, {});
