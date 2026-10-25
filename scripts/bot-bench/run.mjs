@@ -22,7 +22,12 @@ async function worker() {
 	while (next < jobs.length) {
 		const job = jobs[next++];
 		const t0 = Date.now();
-		const res = await (await fetch(`${BENCH}/?m=${encodeURIComponent(job.m)}&w=${encodeURIComponent(job.w)}&r=${redraws}`)).json();
+		let res;
+		try {
+			res = await (await fetch(`${BENCH}/?m=${encodeURIComponent(job.m)}&w=${encodeURIComponent(job.w)}&r=${redraws}`)).json();
+		} catch (err) {
+			res = { error: String(err) };
+		}
 		const ms = Date.now() - t0;
 		if (res.best) fs.writeFileSync(path.join(out, `${job.m.split('/').pop()}${process.env.TAG ?? ''}-${job.w.replace(/\W+/g, '_')}.png`), Buffer.from(res.best.png, 'base64'));
 		results.push({ ...job, ms, rank: res.best?.rank ?? 99, p: res.best?.p ?? 0, attempts: res.attempts ?? 0, source: res.source, error: res.error });

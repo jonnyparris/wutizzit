@@ -27,6 +27,7 @@ import { opsToPngBase64, visibleOps } from '../game/raster';
 import { cleanShapes, seededRandom, shapesToOps, type Shape } from '../game/shapes';
 import { BOT_MODELS, createBrain, DEFAULT_BOT_MODEL, findModel, type Brain, type BotModel } from '../bots/brain';
 import { prepareDrawing, type Artwork } from '../bots/artist';
+import type { AiSpendKind } from './GlobalStats';
 
 // ---------------------------------------------------------------------------
 // Timings
@@ -61,8 +62,9 @@ const BOT_CONFIDENT = 0.45;
 const BOT_REVISIONS = 2;
 const BOT_PREP_MS = 25_000;
 /** Per-room daily AI calls, on top of the global budget in GlobalStats, so one room can't drain it. */
-const ROOM_AI_FREE_CALLS = 600;
-const ROOM_AI_PAID_CALLS = 150;
+// A bot turn costs up to 4 model calls (draft, careful plan, 2 redraws) plus a few Clef checks;
+// a guess is one Clef call, plus a vision call when Clef isn't sure.
+const ROOM_AI_LIMITS = { free: 1500, paid: 300, clef: 5000 } as const;
 const utcDay = () => new Date().toISOString().slice(0, 10);
 /** Shape drawings are replayed over roughly this long so everyone watches them appear. */
 const REPLAY_TARGET_MS = 14_000;
@@ -166,7 +168,7 @@ interface RoomState {
 	/** Team games: how often each player has drawn, which team drew last, and banked team points. */
 	teamTurns?: { last: 'A' | 'B' | null; draws: Record<string, number>; points: { A: number; B: number } };
 	/** AI calls this room made today. */
-	aiSpend?: { day: string; free: number; paid: number };
+	aiSpend?: { day: string; free: number; paid: number; clef?: number };
 	/** ipHash → ban expiry. */
 	bans: Record<string, number>;
 	round: RoundRec | null;
@@ -1017,28 +1019,38 @@ export class GameRoomObject extends DurableObject<Env> {
 	}
 
 	/** Checks the shared daily AI budget. A bot that runs out says so once and sits quietly. */
-	private async spendAi(botId: string, paid: boolean): Promise<boolean> {
+	/**
+	 * Reserves one AI call against the room's and the global daily budget. Only a failed spend for
+	 * the bot's own model counts as "out of energy": Clef checks are optional extras.
+	 */
+	private async spendAi(botId: string, kind: AiSpendKind): Promise<boolean> {
 		const s = this.state!;
 		const day = utcDay();
-		if (s.aiSpend?.day !== day) s.aiSpend = { day, free: 0, paid: 0 };
+		if (s.aiSpend?.day !== day) s.aiSpend = { day, free: 0, paid: 0, clef: 0 };
 		const room = s.aiSpend;
-		let ok = paid ? room.paid < ROOM_AI_PAID_CALLS : room.free < ROOM_AI_FREE_CALLS;
-		if (ok) {
-			try {
-				ok = await this.env.GLOBAL_STATS.getByName('global').spendAi(paid);
-			} catch (err) {
-				// Fail closed: a broken budget check must not mean an unlimited budget.
-				console.warn('ai budget check failed', err);
-				ok = false;
-			}
+		room.clef ??= 0;
+		if (room[kind]! >= ROOM_AI_LIMITS[kind]) return this.outOfEnergy(botId, kind, day);
+		// Count before the await, so concurrent calls can't all pass the room check at once.
+		room[kind]!++;
+		let ok = false;
+		try {
+			ok = await this.env.GLOBAL_STATS.getByName('global').spendAi(kind);
+		} catch (err) {
+			// Fail closed: a broken budget check must not mean an unlimited budget.
+			console.warn('ai budget check failed', err);
 		}
-		if (ok) room[paid ? 'paid' : 'free']++;
+		if (ok) return true;
+		room[kind]!--;
+		return this.outOfEnergy(botId, kind, day);
+	}
+
+	private outOfEnergy(botId: string, kind: AiSpendKind, day: string): false {
 		const b = this.state?.bots[botId];
-		if (!ok && b && b.outOfBudget !== day) {
+		if (kind !== 'clef' && b && b.outOfBudget !== day) {
 			b.outOfBudget = day;
 			this.system(`${this.state!.players[botId].username} is out of energy for today (AI budget reached).`);
 		}
-		return ok;
+		return false;
 	}
 
 	private stillGuessing(botId: string, roundNumber: number): boolean {
@@ -1052,7 +1064,7 @@ export class GameRoomObject extends DurableObject<Env> {
 		const round = this.state?.round;
 		if (!round || round.number !== roundNumber || round.drawerId !== botId || this.state!.phase !== 'choosing' || round.word) return;
 		let index = Math.floor(Math.random() * round.choices.length);
-		if (await this.spendAi(botId, false)) {
+		if (await this.spendAi(botId, 'clef')) {
 			try {
 				index = await this.brain.easiest(round.choices);
 			} catch (err) {
@@ -1082,7 +1094,7 @@ export class GameRoomObject extends DurableObject<Env> {
 		const shortlist = [...new Set([...(b.ideas ?? []), ...WORDS])].filter((w) => fitsMask(w, mask) && fresh(w));
 
 		let pick: string | undefined;
-		if (shortlist.length && (await this.spendAi(botId, false))) {
+		if (shortlist.length && (await this.spendAi(botId, 'clef'))) {
 			try {
 				const ranked = await this.brain.pick(png, shortlist);
 				if (ranked.choice && ranked.p >= BOT_CONFIDENT) pick = ranked.choice;
@@ -1091,10 +1103,11 @@ export class GameRoomObject extends DurableObject<Env> {
 			}
 		}
 		if (!pick) {
-			if (!this.stillGuessing(botId, roundNumber) || !(await this.spendAi(botId, model.paid))) return;
+			if (!this.stillGuessing(botId, roundNumber) || !(await this.spendAi(botId, model.paid ? 'paid' : 'free'))) return;
 			const hint = [...mask].join(' ');
 			const letters = [...word].filter((c) => /[\p{L}\p{N}]/u.test(c)).length;
 			const ideas = await this.brain.guess(model, { png, hint, letters, tried });
+			if (!this.stillGuessing(botId, roundNumber)) return;
 			b.ideas = [...new Set([...(b.ideas ?? []), ...ideas])].slice(-30);
 			pick = ideas.find(fresh);
 		}
@@ -1115,8 +1128,9 @@ export class GameRoomObject extends DurableObject<Env> {
 		try {
 			art = await prepareDrawing(this.brain, model, s.round!.word!, {
 				active: stillDrawing,
-				spend: (paid) => this.spendAi(botId, paid),
-				deadline: Date.now() + BOT_PREP_MS,
+				spend: (kind) => this.spendAi(botId, kind),
+				// Leave most of a short round for the replay and for guessing.
+				deadline: Date.now() + Math.min(BOT_PREP_MS, Math.max(5_000, ((s.deadline ?? Date.now()) - Date.now()) * 0.4)),
 				maxRevisions: BOT_REVISIONS,
 			});
 			if (art) console.log(JSON.stringify({ msg: 'bot drew', model: model.id, source: art.source, attempts: art.attempts, p: art.verdict?.p ?? null }));

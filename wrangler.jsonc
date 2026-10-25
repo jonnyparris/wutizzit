@@ -43,7 +43,8 @@
 	"vars": {
 		"AI_GATEWAY_ID": "default",
 		"AI_DAILY_FREE_CALLS": "20000",
-		"AI_DAILY_PAID_CALLS": "1500"
+		"AI_DAILY_PAID_CALLS": "1500",
+		"AI_DAILY_CLEF_CALLS": "100000"
 	},
 
 	// Workers Rate Limiting binding: cheap, per-colo abuse protection on room

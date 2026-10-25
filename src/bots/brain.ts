@@ -60,7 +60,7 @@ export interface Judgement {
 	p: number;
 	/** 1 = Clef's top pick was the target word. */
 	rank: number;
-	/** Clef's top three readings, e.g. ["penguin 41%", ...], fed back to the artist when revising. */
+	/** Clef's top three readings, e.g. ["penguin (41%)", ...], fed back to the artist when revising. */
 	top: string[];
 }
 
@@ -217,8 +217,16 @@ ${COMPACT_SHAPES_HELP}
 Use 8-20 shapes. Make it big and centred. Big outline shapes first, then details. Reply as {"shapes":[[...],[...]]}.`;
 }
 
-function revisePrompt(word: string, shapes: Shape[], misreadAs: string[]): string {
-	return `This image is your drawing of "${word}" for a Pictionary game. A viewer thought it looked most like: ${misreadAs.join(', ')}.
+function revisePrompt(word: string, shapes: Shape[], readings: string[]): string {
+	// Readings can include the word itself (recognised, but not clearly enough).
+	const key = word.toLowerCase();
+	const mine = readings.find((r) => r.toLowerCase().startsWith(`${key} (`));
+	const others = readings.filter((r) => r !== mine);
+	const feedback = [
+		mine ? `A viewer was only ${mine.slice(key.length).trim().replace(/[()]/g, '')} sure it was "${word}".` : `A viewer didn't see "${word}" in it.`,
+		others.length ? `They thought it might be: ${others.join(', ')}.` : '',
+	].join(' ');
+	return `This image is your drawing of "${word}" for a Pictionary game. ${feedback}
 Improve it so it obviously reads as "${word}": exaggerate its most iconic features, fix proportions, remove anything confusing. Never write letters or words.
 ${COMPACT_SHAPES_HELP}
 Your current shapes (as objects): ${JSON.stringify(shapes).slice(0, 6000)}
@@ -274,10 +282,12 @@ Reply as {"guesses":["best","second","third"]}: up to 3 single nouns that fit th
 		async judge(png, word) {
 			const answers = await clef({ state: SKETCH, png, questions: { what: choice('What is this sketch a drawing of?', [word, ...distractorsFor(word)]) } });
 			const probs = Object.entries(answers.what?.probabilities ?? {}).sort((a, b) => b[1] - a[1]);
-			const rank = probs.findIndex(([w]) => w === word) + 1;
+			// No probabilities means Clef's answer didn't parse: that's "no verdict", not "recognised".
+			if (!probs.length) throw new Error('clef returned no probabilities');
+			const index = probs.findIndex(([w]) => w === word);
 			return {
 				p: answers.what?.probabilities?.[word] ?? 0,
-				rank: rank || probs.length + 1,
+				rank: index >= 0 ? index + 1 : Infinity,
 				top: probs.slice(0, 3).map(([w, p]) => `${w} (${Math.round(p * 100)}%)`),
 			};
 		},
@@ -287,6 +297,7 @@ Reply as {"guesses":["best","second","third"]}: up to 3 single nouns that fit th
 			if (!list.length) return { choice: null, p: 0 };
 			const answers = await clef({ state: SKETCH, png, questions: { what: choice('What is this sketch a drawing of?', [...list, NONE_OF_THESE]) } });
 			const probs = Object.entries(answers.what?.probabilities ?? {}).sort((a, b) => b[1] - a[1]);
+			if (!probs.length) throw new Error('clef returned no probabilities');
 			const [top, p] = probs[0] ?? [NONE_OF_THESE, 0];
 			return top === NONE_OF_THESE ? { choice: null, p } : { choice: top, p };
 		},

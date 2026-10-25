@@ -53,7 +53,7 @@ In the lobby, the host clicks **Add bot** and picks a model. A room can have up 
   2. Each attempt is rendered exactly as it will appear, and Clef checks whether it reads as the word.
   3. The first attempt Clef clearly recognises is shown, so a good draft appears within seconds.
   4. If the draft isn't clear, the bot looks at it, is told what Clef mistook it for, and redraws,
-     while the careful plan is still thinking. The best attempt is used after 25 seconds at most.
+     while the careful plan is still thinking. The best attempt is used after 25 seconds at most, or sooner in short rounds.
 - **Clef** (`@cf/cloudflare/clef-flash`, a fast multimodal decision model) makes the quick calls.
   Each call takes about half a second and costs a fraction of a cent:
   - It picks the easiest of the offered words.
@@ -68,10 +68,13 @@ In the lobby, the host clicks **Add bot** and picks a model. A room can have up 
   the letter hint and the guesses already made.
 - **Limits:**
   - Bots only play while at least one human or agent is connected.
-  - Each room can make 600 Workers AI calls and 150 third-party calls a day.
-  - A global daily budget caps all rooms together. The defaults are 20,000 Workers AI calls and
-    1,500 third-party calls (`AI_DAILY_FREE_CALLS` and `AI_DAILY_PAID_CALLS` in `wrangler.jsonc`).
-  - When the budget runs out, bots sit out: they stop guessing and skip their drawing turns.
+  - A bot's drawing turn costs up to 4 model calls (draft, careful plan, 2 redraws) plus a few Clef
+    checks. A guess costs one Clef call, plus one model call when Clef isn't sure.
+  - Each room can make 1,500 Workers AI calls, 300 third-party calls and 5,000 Clef calls a day.
+  - A global daily budget caps all rooms together. The defaults are 20,000 Workers AI calls, 1,500
+    third-party calls and 100,000 Clef calls (`AI_DAILY_*_CALLS` in `wrangler.jsonc`).
+  - When a bot's model runs out of budget, the bot sits out: it stops guessing and skips its
+    drawing turns. When Clef runs out, bots carry on without the checks.
 
 **How the models were picked:** `scripts/bot-bench/` runs the models on the same words. It renders
 each drawing the way the game does and asks Clef what it shows, out of the word and 60 random

@@ -17,7 +17,7 @@ export default {
 				maxRevisions: Number(u.searchParams.get('r') ?? 2),
 			});
 			if (!art) return Response.json({ word, model: id, error: 'no drawing' });
-			return Response.json({ word, model: id, attempts: art.attempts, source: art.source, best: { p: art.verdict?.p ?? 0, rank: art.verdict?.rank ?? 99, top: art.verdict?.top ?? [], png: art.png } });
+			return Response.json({ word, model: id, attempts: art.attempts, source: art.source, best: { p: art.verdict?.p ?? 0, rank: art.verdict?.rank ?? 99, judged: !!art.verdict, top: art.verdict?.top ?? [], png: art.png } });
 		} catch (err) {
 			return Response.json({ word, model: id, error: String(err) });
 		}

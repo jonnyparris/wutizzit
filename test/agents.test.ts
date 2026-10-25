@@ -314,6 +314,26 @@ describe('bots', () => {
 		});
 	});
 
+	it('still picks a word when Clef fails', async () => {
+		const { roomId, client } = await humanRoom();
+		await installFakeBrain(roomId, {});
+		await inRoom(roomId, (obj) => {
+			obj.brain.easiest = async () => {
+				throw new Error('clef down');
+			};
+		});
+		client.send({ type: 'add-bot' });
+		await client.state((x) => x.players.length === 2);
+		client.send({ type: 'start', settings: { maxRounds: 2, roundDuration: 60 } });
+		await client.state((x) => x.phase === 'choosing');
+		client.send({ type: 'choose', index: 0 });
+		await client.state((x) => x.phase === 'drawing');
+		await inRoom(roomId, (obj) => obj.endRound('test'));
+		await inRoom(roomId, (obj) => obj.nextRoundOrFinish());
+		await stepBots(roomId);
+		await client.state((x) => x.phase === 'drawing' && x.round.drawerId !== x.you.id);
+	});
+
 	it('redraws when Clef cannot recognise the drawing, and shows the better one', async () => {
 		const { roomId, client, calls } = await botTurn({ verdicts: [{ p: 0.05, rank: 9 }, { p: 0.9, rank: 1 }] });
 		await client.state((x) => x.phase === 'drawing' && x.round.drawerId !== x.you.id);
