@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { prepareDrawing, type ArtistHooks } from '../src/bots/artist';
+import { botPrepTiming, prepareDrawing, type ArtistHooks } from '../src/bots/artist';
 import { BOT_MODELS, createBrain, type Brain, type Judgement } from '../src/bots/brain';
 import { rasterize } from '../src/game/raster';
 import { cleanShapes, seededRandom, shapesToOps, type Shape } from '../src/game/shapes';
@@ -15,6 +15,8 @@ interface Script {
 	revise?: { shapes?: Shape[]; ms?: number };
 	/** Verdict per fill colour; a missing colour makes judge throw. */
 	verdicts: Record<string, Partial<Judgement>>;
+	/** Judge never answers. */
+	judgeHangs?: boolean;
 }
 
 function fakeBrain(script: Script) {
@@ -37,6 +39,7 @@ function fakeBrain(script: Script) {
 		},
 		async judge() {
 			calls.judge++;
+			if (script.judgeHangs) return new Promise<Judgement>(() => {});
 			const v = script.verdicts[lastFill];
 			if (!v) throw new Error('clef down');
 			return { p: 0, rank: 9, top: [], ...v };
@@ -77,8 +80,26 @@ describe('prepareDrawing', () => {
 
 	it('still shows a slow draft that misses the soft deadline', async () => {
 		const { brain } = fakeBrain({ draft: { shapes: shape('red'), ms: 400 }, verdicts: { '#ef4444': { p: 0.3, rank: 2 } } });
+		const t0 = Date.now();
 		const art = await prepareDrawing(brain, gemini, 'x', hooks({ deadline: Date.now() + 100, giveUpAt: Date.now() + 2_000, maxRevisions: 0 }));
 		expect(fillOf(art?.shapes)).toBe('#ef4444');
+		expect(Date.now() - t0).toBeLessThan(1_000);
+	});
+
+	it('lets the careful plan win while the draft hangs', async () => {
+		const { brain } = fakeBrain({ draft: { shapes: shape('red'), ms: 60_000 }, careful: { shapes: shape('green'), ms: 50 }, verdicts: { '#22c55e': { p: 0.3, rank: 3 } } });
+		const t0 = Date.now();
+		const art = await prepareDrawing(brain, deepseek, 'x', hooks({ deadline: Date.now() + 300, giveUpAt: Date.now() + 3_000, maxRevisions: 0 }));
+		expect(fillOf(art?.shapes)).toBe('#22c55e');
+		expect(Date.now() - t0).toBeLessThan(1_000);
+	});
+
+	it('does not let a hanging Clef hold up a drawable draft past the soft deadline', async () => {
+		const { brain } = fakeBrain({ draft: { shapes: shape('red') }, verdicts: {}, judgeHangs: true });
+		const t0 = Date.now();
+		const art = await prepareDrawing(brain, gemini, 'x', hooks({ deadline: Date.now() + 200, giveUpAt: Date.now() + 3_000 }));
+		expect(fillOf(art?.shapes)).toBe('#ef4444');
+		expect(Date.now() - t0).toBeLessThan(800);
 	});
 
 	it('never swaps a judged attempt for one Clef failed to judge', async () => {
@@ -115,6 +136,14 @@ describe('prepareDrawing', () => {
 		expect(fillOf(art?.shapes)).toBe('#ef4444');
 		const none = await prepareDrawing(brain, deepseek, 'x', hooks({ spend: async () => false }));
 		expect(none).toBeNull();
+	});
+});
+
+describe('botPrepTiming', () => {
+	it('scales with the time left and keeps room for the replay', () => {
+		expect(botPrepTiming(100_000, 40_000)).toEqual({ deadline: 40_000 + 24_000, giveUpAt: 90_000 });
+		expect(botPrepTiming(1_000_000, 0).deadline).toBe(25_000);
+		expect(botPrepTiming(5_000, 0).deadline).toBe(5_000);
 	});
 });
 

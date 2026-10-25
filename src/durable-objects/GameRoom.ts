@@ -26,7 +26,7 @@ import { pickWords, WORDS } from '../utils/words';
 import { opsToPngBase64, visibleOps } from '../game/raster';
 import { cleanShapes, seededRandom, shapesToOps, type Shape } from '../game/shapes';
 import { BOT_MODELS, createBrain, DEFAULT_BOT_MODEL, findModel, type Brain, type BotModel } from '../bots/brain';
-import { prepareDrawing, type Artwork } from '../bots/artist';
+import { botPrepTiming, prepareDrawing, type Artwork } from '../bots/artist';
 import type { AiSpendKind } from './GlobalStats';
 
 // ---------------------------------------------------------------------------
@@ -58,11 +58,9 @@ const BOT_GUESS_EVERY_MS = [7_000, 11_000] as const;
 const BOT_CHOOSE_MS = 1_500;
 /** Clef's probability needed before a bot guesses its top-ranked word without asking the vision model. */
 const BOT_CONFIDENT = 0.45;
-/** Redraws allowed when Clef can't recognise a bot's drawing, and the time limit for preparing it. */
+/** Redraws allowed when Clef can't recognise a bot's drawing (timing: botPrepTiming in bots/artist). */
 const BOT_REVISIONS = 2;
-const BOT_PREP_MS = 25_000;
-/** A drawing needs at least this long on screen to be worth starting. */
-const BOT_MIN_SHOW_MS = 10_000;
+
 /** Per-room daily AI calls, on top of the global budget in GlobalStats, so one room can't drain it. */
 // A bot turn costs up to 4 model calls (draft, careful plan, 2 redraws) plus a few Clef checks;
 // a guess is one Clef call, plus a vision call when Clef isn't sure.
@@ -1131,10 +1129,7 @@ export class GameRoomObject extends DurableObject<Env> {
 			art = await prepareDrawing(this.brain, model, s.round!.word!, {
 				active: stillDrawing,
 				spend: (kind) => this.spendAi(botId, kind),
-				// Leave most of a short round for the replay and for guessing...
-				deadline: Date.now() + Math.min(BOT_PREP_MS, Math.max(5_000, ((s.deadline ?? Date.now()) - Date.now()) * 0.4)),
-				// ...but with nothing to show yet, wait as long as a short replay still fits.
-				giveUpAt: (s.deadline ?? Date.now()) - BOT_MIN_SHOW_MS,
+				...botPrepTiming(s.deadline ?? Date.now()),
 				maxRevisions: BOT_REVISIONS,
 			});
 			if (art) console.log(JSON.stringify({ msg: 'bot drew', model: model.id, source: art.source, attempts: art.attempts, p: art.verdict?.p ?? null }));

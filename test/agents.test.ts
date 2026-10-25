@@ -433,7 +433,7 @@ describe('bot budget', () => {
 		await inRoom(roomId, (obj) => {
 			obj.state.aiSpend = { day: new Date().toISOString().slice(0, 10), free: 0, paid: 0, clef: 5000 };
 		});
-		client.send({ type: 'start', settings: { maxRounds: 2, roundDuration: 60 } });
+		client.send({ type: 'start', settings: { maxRounds: 4, roundDuration: 60 } });
 		await client.state((x) => x.phase === 'choosing');
 		client.send({ type: 'choose', index: 0 });
 		await client.state((x) => x.phase === 'drawing');
@@ -444,7 +444,21 @@ describe('bot budget', () => {
 		await stepBots(roomId); // draw without Clef checks
 		await client.next((m) => m.type === 'draw' && m.op.k === 'fill', 5000);
 		expect(calls.easiest).toBe(0);
+		expect(calls.judge).toBe(0);
 		expect(client.messages.some((m) => m.type === 'chat' && /out of energy/.test(m.msg.text))).toBe(false);
+
+		// Guessing falls back to the vision model.
+		await inRoom(roomId, (obj) => obj.endRound('test'));
+		await inRoom(roomId, (obj) => obj.nextRoundOrFinish());
+		await client.state((x) => x.phase === 'choosing' && x.round.drawerId === x.you.id);
+		client.send({ type: 'choose', index: 0 });
+		await client.state((x) => x.phase === 'drawing' && x.round.drawerId === x.you.id);
+		for (let i = 0; i < 4; i++) client.send({ type: 'draw', op: { k: 'line', s: i + 1, c: '#000000', w: 4, p: [10, 10, 200, 200] } });
+		await sleep(50);
+		await stepBots(roomId);
+		await client.next((m) => m.type === 'chat' && m.msg.text === 'nope');
+		expect(calls.pick).toBe(0);
+		expect(calls.guess).toBeGreaterThan(0);
 	});
 
 	it('never lets two concurrent spends take the last slot', async () => {

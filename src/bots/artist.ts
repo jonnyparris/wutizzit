@@ -48,15 +48,30 @@ const REVISION_MS = 4_000;
 /** Hybrid models (thinking can be switched off) race a fast draft against a careful plan. */
 export const isHybrid = (m: BotModel) => m.provider === 'workers-ai' && m.thinking === false;
 
+/** Prep timing for a round ending at `roundEnd` (ms since epoch). Shared by the game and the bench. */
+export function botPrepTiming(roundEnd: number, now = Date.now()): { deadline: number; giveUpAt: number } {
+	const remaining = Math.max(0, roundEnd - now);
+	return {
+		// Leave most of a short round for the replay and for guessing...
+		deadline: now + Math.min(PREP_MAX_MS, Math.max(PREP_MIN_MS, remaining * 0.4)),
+		// ...but with nothing to show yet, wait as long as a short replay still fits.
+		giveUpAt: roundEnd - MIN_SHOW_MS,
+	};
+}
+const PREP_MAX_MS = 25_000;
+const PREP_MIN_MS = 5_000;
+/** A drawing needs at least this long on screen to be worth starting. */
+const MIN_SHOW_MS = 10_000;
+
 export async function prepareDrawing(brain: Brain, model: BotModel, word: string, hooks: ArtistHooks): Promise<Artwork | null> {
 	const kind: AiSpendKind = model.paid ? 'paid' : 'free';
 	const giveUpAt = Math.max(hooks.deadline, hooks.giveUpAt ?? hooks.deadline);
-	/** Time left to improve; once something is drawable, that's the soft deadline, else the hard one. */
-	const left = () => (best ? hooks.deadline : giveUpAt) - Date.now();
-	/** Resolves to `fallback` when time is up instead of waiting on a slow call. */
-	const beforeDeadline = <T>(p: Promise<T>, fallback: T): Promise<T> => {
+	const untilSoft = () => hooks.deadline - Date.now();
+	/** Resolves to `fallback` after `ms` instead of waiting on a slow call. */
+	const within = <T>(p: Promise<T>, fallback: T, ms: number): Promise<T> => {
+		if (ms <= 0) return Promise.resolve(fallback);
 		let timer: ReturnType<typeof setTimeout> | undefined;
-		return Promise.race([p, new Promise<T>((r) => (timer = setTimeout(() => r(fallback), Math.max(0, left()))))]).finally(() => {
+		return Promise.race([p, new Promise<T>((r) => (timer = setTimeout(() => r(fallback), ms)))]).finally(() => {
 			if (timer) clearTimeout(timer);
 		});
 	};
@@ -64,19 +79,21 @@ export async function prepareDrawing(brain: Brain, model: BotModel, word: string
 	let best: Artwork | null = null;
 	let attempts = 0;
 	const consider = async (shapes: Shape[], source: Artwork['source']): Promise<Artwork | null> => {
-		if (!shapes.length || !hooks.active() || left() <= 0) return null;
+		if (!shapes.length || !hooks.active()) return null;
 		attempts++;
 		const seed = Math.floor(Math.random() * 2 ** 31);
 		const png = await opsToPngBase64(shapesToOps(shapes, 1, LIMITS.maxOpsPerRound, { freehand: true, rand: seededRandom(seed) }), 0.5);
-		const verdict = (await hooks.spend('clef')) ? await beforeDeadline(brain.judge(png, word).catch(() => null), null) : null;
+		// Judging is an improvement step, so it never runs past the soft deadline.
+		const budget = untilSoft();
+		const verdict = budget > 0 && (await hooks.spend('clef')) ? await within(brain.judge(png, word).catch(() => null), null, budget) : null;
 		const art: Artwork = { shapes, seed, verdict, png, source, attempts };
 		// An unjudged attempt only beats nothing: never replace a judged one with it.
-		if (!best || (verdict && (verdict.p > (best.verdict?.p ?? -1)))) best = art;
+		if (!best || (verdict && verdict.p > (best.verdict?.p ?? -1))) best = art;
 		return art;
 	};
 	/**
-	 * Stop at the first clearly recognised attempt. Without any verdict at all (Clef down or out of
-	 * budget), the first attempt is accepted as is.
+	 * Stop at the first clearly recognised attempt. Without any verdict at all (Clef down, out of
+	 * budget, or out of time), the first drawable attempt is accepted as is.
 	 */
 	const done = (a: Artwork | null) => !!a && (a.verdict ? isRecognised(a.verdict) : !best?.verdict);
 
@@ -85,13 +102,8 @@ export async function prepareDrawing(brain: Brain, model: BotModel, word: string
 	if (!(await hooks.spend(kind))) return null;
 	const careful = isHybrid(model) && (await hooks.spend(kind)) ? plan({ ...model, thinking: true }) : null;
 
-	const draftCall = plan(model);
-	const draftShapes = await beforeDeadline(draftCall, null);
-	const draft = draftShapes ? await consider(draftShapes, 'draft') : null;
-	if (done(draft)) return draft;
-
-	// The loop removes each result as it handles it. (Removing on settle would drop a result that
-	// arrives while the loop is busy elsewhere.)
+	// Every candidate (draft, careful plan, redraws) goes into one race. The loop removes each result
+	// as it handles it. (Removing on settle would drop a result that arrives while the loop is busy.)
 	type Result = { id: number; shapes: Shape[]; source: Artwork['source'] };
 	const pending = new Map<number, Promise<Result>>();
 	let nextId = 0;
@@ -104,19 +116,19 @@ export async function prepareDrawing(brain: Brain, model: BotModel, word: string
 	/** Starts a redraw of the best attempt so far, unless one is already running. */
 	const revise = async () => {
 		const base = best;
-		if (!base || revising || revisions >= hooks.maxRevisions || left() < REVISION_MS || !hooks.active()) return;
+		if (!base || revising || revisions >= hooks.maxRevisions || untilSoft() < REVISION_MS || !hooks.active()) return;
 		if (!(await hooks.spend(kind))) return;
 		revisions++;
 		revising = true;
 		add(brain.revise(model, word, base.shapes, base.png, base.verdict?.top ?? []), 'revision');
 	};
 
-	// A draft that missed the soft deadline may still arrive before the hard one.
-	if (!draftShapes) add(draftCall, 'draft');
+	add(plan(model), 'draft');
 	if (careful) add(careful, 'careful');
-	await revise();
-	while (pending.size && hooks.active() && left() > 0) {
-		const next = await beforeDeadline(Promise.race(pending.values()), null);
+	while (pending.size && hooks.active()) {
+		// Once something is drawable, stop at the soft deadline; until then, wait for the hard one.
+		const wait = (best ? hooks.deadline : giveUpAt) - Date.now();
+		const next = await within(Promise.race(pending.values()), null, wait);
 		if (!next) break;
 		pending.delete(next.id);
 		if (next.source === 'revision') revising = false;

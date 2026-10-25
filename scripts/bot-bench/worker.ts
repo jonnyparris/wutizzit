@@ -1,7 +1,7 @@
 // Prepares a drawing with a bot model exactly as the game does (src/bots/artist.ts) and returns
 // Clef's verdict, which step produced it, and the PNG.
 import { BOT_MODELS, createBrain, type BotModel } from '../../src/bots/brain';
-import { prepareDrawing } from '../../src/bots/artist';
+import { botPrepTiming, prepareDrawing } from '../../src/bots/artist';
 
 export default {
 	async fetch(req: Request, env: { AI: Ai; AI_GATEWAY_ID?: string }): Promise<Response> {
@@ -14,8 +14,7 @@ export default {
 				active: () => true,
 				spend: async () => true,
 				// Same timing as the game for a round of `d` seconds (default 60).
-				deadline: Date.now() + Math.min(25_000, Math.max(5_000, Number(u.searchParams.get('d') ?? 60) * 400)),
-				giveUpAt: Date.now() + Number(u.searchParams.get('d') ?? 60) * 1000 - 10_000,
+				...botPrepTiming(Date.now() + (Number(u.searchParams.get('d')) || 60) * 1000),
 				maxRevisions: Number(u.searchParams.get('r') ?? 2),
 			});
 			if (!art) return Response.json({ word, model: id, error: 'no drawing' });
