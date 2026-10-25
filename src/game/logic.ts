@@ -97,6 +97,14 @@ export function maskWord(word: string, revealed: readonly number[] = []): string
 	return [...word].map((c, i) => (LETTER.test(c) && !show.has(i) ? '_' : c)).join('');
 }
 
+/** Does `candidate` fit a masked word like "_a__ ___" (same length, spaces and revealed letters)? */
+export function fitsMask(candidate: string, mask: string): boolean {
+	const c = [...candidate.toLowerCase()];
+	const m = [...mask.toLowerCase()];
+	if (c.length !== m.length) return false;
+	return m.every((ch, i) => (ch === '_' ? LETTER.test(c[i]) : ch === c[i]));
+}
+
 /** How many letters may be revealed as hints: never more than a third of the word. */
 export function maxHints(word: string): number {
 	const n = letterIndices(word).length;

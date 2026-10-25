@@ -13,6 +13,7 @@ import {
 	isWordMatch,
 	letterIndices,
 	LIMITS,
+	fitsMask,
 	maskWord,
 	maxHints,
 	normalizeGuess,
@@ -21,9 +22,12 @@ import {
 } from '../game/logic';
 import { generateId, generateToken, pickRandom } from '../utils/id';
 import { pickWords, WORDS } from '../utils/words';
+
 import { opsToPngBase64, visibleOps } from '../game/raster';
-import { cleanShapes, shapesToOps, type Shape } from '../game/shapes';
+import { cleanShapes, seededRandom, shapesToOps, type Shape } from '../game/shapes';
 import { BOT_MODELS, createBrain, DEFAULT_BOT_MODEL, findModel, type Brain, type BotModel } from '../bots/brain';
+import { botPrepTiming, prepareDrawing, type Artwork } from '../bots/artist';
+import type { AiSpendKind } from './GlobalStats';
 
 // ---------------------------------------------------------------------------
 // Timings
@@ -52,9 +56,15 @@ const BOT_MAX_GUESSES = 8;
 const BOT_FIRST_LOOK_MS = [5_000, 8_000] as const;
 const BOT_GUESS_EVERY_MS = [7_000, 11_000] as const;
 const BOT_CHOOSE_MS = 1_500;
+/** Clef's probability needed before a bot guesses its top-ranked word without asking the vision model. */
+const BOT_CONFIDENT = 0.45;
+/** Redraws allowed when Clef can't recognise a bot's drawing (timing: botPrepTiming in bots/artist). */
+const BOT_REVISIONS = 2;
+
 /** Per-room daily AI calls, on top of the global budget in GlobalStats, so one room can't drain it. */
-const ROOM_AI_FREE_CALLS = 600;
-const ROOM_AI_PAID_CALLS = 150;
+// A bot turn costs up to 4 model calls (draft, careful plan, 2 redraws) plus a few Clef checks;
+// a guess is one Clef call, plus a vision call when Clef isn't sure.
+const ROOM_AI_LIMITS = { free: 1500, paid: 300, clef: 5000 } as const;
 const utcDay = () => new Date().toISOString().slice(0, 10);
 /** Shape drawings are replayed over roughly this long so everyone watches them appear. */
 const REPLAY_TARGET_MS = 14_000;
@@ -105,6 +115,8 @@ interface BotRec {
 	guesses: number;
 	planned: boolean;
 	tried: string[];
+	/** Free-form ideas from the vision model this round; Clef ranks them with the hint's word-list matches. */
+	ideas?: string[];
 	/** UTC day the bot last ran out of AI budget, so it says so once and retries after the reset. */
 	outOfBudget: string | false;
 }
@@ -156,7 +168,7 @@ interface RoomState {
 	/** Team games: how often each player has drawn, which team drew last, and banked team points. */
 	teamTurns?: { last: 'A' | 'B' | null; draws: Record<string, number>; points: { A: number; B: number } };
 	/** AI calls this room made today. */
-	aiSpend?: { day: string; free: number; paid: number };
+	aiSpend?: { day: string; free: number; paid: number; clef?: number };
 	/** ipHash → ban expiry. */
 	bans: Record<string, number>;
 	round: RoundRec | null;
@@ -709,12 +721,13 @@ export class GameRoomObject extends DurableObject<Env> {
 	}
 
 	/** Queues shapes for replay, capped so the canvas (stored plus queued) never passes the op limit. */
-	private queueShapes(playerId: string, shapes: Shape[]): boolean {
+	private queueShapes(playerId: string, shapes: Shape[], seed = Math.floor(Math.random() * 2 ** 31)): boolean {
 		this.opCount ??= this.ctx.storage.sql.exec<{ n: number }>('SELECT COUNT(*) AS n FROM ops').one().n;
 		const queued = this.replay?.playerId === playerId ? this.replay.ops.length : 0;
 		const budget = LIMITS.maxOpsPerRound - this.opCount - queued;
 		if (budget <= 0) return false;
-		const ops = shapesToOps(shapes, this.nextStrokeId(), budget);
+		// Shapes from bots and agents are drawn with a hand-drawn wobble, so they look like human strokes.
+		const ops = shapesToOps(shapes, this.nextStrokeId(), budget, { freehand: true, rand: seededRandom(seed) });
 		if (ops.length) this.enqueueOps(playerId, ops);
 		return ops.length > 0;
 	}
@@ -955,7 +968,7 @@ export class GameRoomObject extends DurableObject<Env> {
 			}
 			b.nextAt = null;
 			if (round.drawerId === id) {
-				if (s.phase === 'choosing' && !round.word) this.chooseWord(round, pickRandom(round.choices));
+				if (s.phase === 'choosing' && !round.word) this.think(id, () => this.botChoose(id, round.number));
 				else if (s.phase === 'drawing' && !b.planned) {
 					b.planned = true;
 					this.think(id, () => this.botDraw(id, round.number));
@@ -980,7 +993,7 @@ export class GameRoomObject extends DurableObject<Env> {
 		for (const id of s.order) {
 			if (s.players[id].kind !== 'bot') continue;
 			const b = (s.bots[id] ??= { round: 0, nextAt: null, guesses: 0, planned: false, tried: [], outOfBudget: false });
-			if (b.round !== round.number) Object.assign(b, { round: round.number, guesses: 0, planned: false, tried: [] });
+			if (b.round !== round.number) Object.assign(b, { round: round.number, guesses: 0, planned: false, tried: [], ideas: [] });
 			if (round.drawerId === id) b.nextAt = now + (s.phase === 'choosing' ? BOT_CHOOSE_MS : 600);
 			else b.nextAt = s.phase === 'drawing' ? now + between(BOT_FIRST_LOOK_MS) : null;
 		}
@@ -1006,28 +1019,38 @@ export class GameRoomObject extends DurableObject<Env> {
 	}
 
 	/** Checks the shared daily AI budget. A bot that runs out says so once and sits quietly. */
-	private async spendAi(botId: string, model: BotModel): Promise<boolean> {
+	/**
+	 * Reserves one AI call against the room's and the global daily budget. Only a failed spend for
+	 * the bot's own model counts as "out of energy": Clef checks are optional extras.
+	 */
+	private async spendAi(botId: string, kind: AiSpendKind): Promise<boolean> {
 		const s = this.state!;
 		const day = utcDay();
-		if (s.aiSpend?.day !== day) s.aiSpend = { day, free: 0, paid: 0 };
+		if (s.aiSpend?.day !== day) s.aiSpend = { day, free: 0, paid: 0, clef: 0 };
 		const room = s.aiSpend;
-		let ok = model.paid ? room.paid < ROOM_AI_PAID_CALLS : room.free < ROOM_AI_FREE_CALLS;
-		if (ok) {
-			try {
-				ok = await this.env.GLOBAL_STATS.getByName('global').spendAi(model.paid);
-			} catch (err) {
-				// Fail closed: a broken budget check must not mean an unlimited budget.
-				console.warn('ai budget check failed', err);
-				ok = false;
-			}
+		room.clef ??= 0;
+		if (room[kind]! >= ROOM_AI_LIMITS[kind]) return this.outOfEnergy(botId, kind, day);
+		// Count before the await, so concurrent calls can't all pass the room check at once.
+		room[kind]!++;
+		let ok = false;
+		try {
+			ok = await this.env.GLOBAL_STATS.getByName('global').spendAi(kind);
+		} catch (err) {
+			// Fail closed: a broken budget check must not mean an unlimited budget.
+			console.warn('ai budget check failed', err);
 		}
-		if (ok) room[model.paid ? 'paid' : 'free']++;
+		if (ok) return true;
+		room[kind]!--;
+		return this.outOfEnergy(botId, kind, day);
+	}
+
+	private outOfEnergy(botId: string, kind: AiSpendKind, day: string): false {
 		const b = this.state?.bots[botId];
-		if (!ok && b && b.outOfBudget !== day) {
+		if (kind !== 'clef' && b && b.outOfBudget !== day) {
 			b.outOfBudget = day;
 			this.system(`${this.state!.players[botId].username} is out of energy for today (AI budget reached).`);
 		}
-		return ok;
+		return false;
 	}
 
 	private stillGuessing(botId: string, roundNumber: number): boolean {
@@ -1036,25 +1059,64 @@ export class GameRoomObject extends DurableObject<Env> {
 		return !!s && !!round && round.number === roundNumber && s.phase === 'drawing' && !!s.players[botId] && round.drawerId !== botId && !round.guessed.includes(botId);
 	}
 
+	/** Picks the word Clef thinks is easiest to draw, or a random one if Clef fails. */
+	private async botChoose(botId: string, roundNumber: number) {
+		const round = this.state?.round;
+		if (!round || round.number !== roundNumber || round.drawerId !== botId || this.state!.phase !== 'choosing' || round.word) return;
+		let index = Math.floor(Math.random() * round.choices.length);
+		if (await this.spendAi(botId, 'clef')) {
+			try {
+				index = await this.brain.easiest(round.choices);
+			} catch (err) {
+				console.warn(JSON.stringify({ msg: 'bot choose failed', error: String(err) }));
+			}
+		}
+		const now = this.state?.round;
+		if (now === round && this.state!.phase === 'choosing' && !round.word) this.chooseWord(round, round.choices[index] ?? pickRandom(round.choices));
+	}
+
+	/**
+	 * One look at the canvas. Clef ranks the built-in words that fit the hint, plus the bot's own
+	 * earlier ideas. If Clef is confident, that's the guess: one cheap call. Otherwise the vision
+	 * model guesses freely (which also covers custom words), and its ideas join the shortlist.
+	 */
 	private async botGuess(botId: string, roundNumber: number) {
 		const model = this.botModel(botId);
-		if (!this.stillGuessing(botId, roundNumber) || !(await this.spendAi(botId, model))) return;
+		if (!this.stillGuessing(botId, roundNumber)) return;
 		const round = this.state!.round!;
 		const word = round.word!;
 		const png = await this.canvasPng(0.5);
 		const b = this.state!.bots[botId];
 		const others = this.state!.chat.filter((m) => m.kind === 'chat' && m.round === undefined && m.ts >= (round.drawStartedAt ?? 0)).map((m) => m.text);
 		const tried = [...new Set([...b.tried, ...others])];
-		const hint = [...maskWord(word, round.revealed)].join(' ');
-		const letters = [...word].filter((c) => /[\p{L}\p{N}]/u.test(c)).length;
-		const guesses = await this.brain.guess(model, { png, hint, letters, tried });
-		if (!this.stillGuessing(botId, roundNumber)) return;
-		const pick = guesses.find((g) => !tried.some((t) => normalizeGuess(t) === normalizeGuess(g)));
-		if (!pick) return;
+		const fresh = (g: string) => !tried.some((t) => normalizeGuess(t) === normalizeGuess(g));
+		const mask = maskWord(word, round.revealed);
+		const shortlist = [...new Set([...(b.ideas ?? []), ...WORDS])].filter((w) => fitsMask(w, mask) && fresh(w));
+
+		let pick: string | undefined;
+		if (shortlist.length && (await this.spendAi(botId, 'clef'))) {
+			try {
+				const ranked = await this.brain.pick(png, shortlist);
+				if (ranked.choice && ranked.p >= BOT_CONFIDENT) pick = ranked.choice;
+			} catch (err) {
+				console.warn(JSON.stringify({ msg: 'bot clef pick failed', error: String(err) }));
+			}
+		}
+		if (!pick) {
+			if (!this.stillGuessing(botId, roundNumber) || !(await this.spendAi(botId, model.paid ? 'paid' : 'free'))) return;
+			const hint = [...mask].join(' ');
+			const letters = [...word].filter((c) => /[\p{L}\p{N}]/u.test(c)).length;
+			const ideas = await this.brain.guess(model, { png, hint, letters, tried });
+			if (!this.stillGuessing(botId, roundNumber)) return;
+			b.ideas = [...new Set([...(b.ideas ?? []), ...ideas])].slice(-30);
+			pick = ideas.find(fresh);
+		}
+		if (!pick || !this.stillGuessing(botId, roundNumber)) return;
 		b.tried.push(pick);
 		await this.onChat(botId, pick);
 	}
 
+	/** Prepares the drawing off-screen (see bots/artist.ts), then replays the best version. */
 	private async botDraw(botId: string, roundNumber: number) {
 		const s = this.state!;
 		const model = this.botModel(botId);
@@ -1062,21 +1124,20 @@ export class GameRoomObject extends DurableObject<Env> {
 			const r = this.state?.round;
 			return !!r && r.number === roundNumber && r.drawerId === botId && this.state!.phase === 'drawing';
 		};
-		if (!stillDrawing() || !(await this.spendAi(botId, model))) {
-			if (stillDrawing()) this.endRound(`${s.players[botId].username} couldn't draw this turn.`);
-			return;
-		}
-		let drawn = 0;
+		let art: Artwork | null = null;
 		try {
-			// Shapes stream in as the model writes them, so the drawing starts within a second or two.
-			await this.brain.plan(model, s.round!.word!, (shapes) => {
-				if (!stillDrawing() || !this.queueShapes(botId, shapes)) return false;
-				drawn += shapes.length;
+			art = await prepareDrawing(this.brain, model, s.round!.word!, {
+				active: stillDrawing,
+				spend: (kind) => this.spendAi(botId, kind),
+				...botPrepTiming(s.deadline ?? Date.now()),
+				maxRevisions: BOT_REVISIONS,
 			});
+			if (art) console.log(JSON.stringify({ msg: 'bot drew', model: model.id, source: art.source, attempts: art.attempts, p: art.verdict?.p ?? null }));
 		} catch (err) {
 			console.warn(JSON.stringify({ msg: 'bot plan failed', model: model.id, error: String(err) }));
 		}
-		if (stillDrawing() && drawn === 0) this.endRound(`${s.players[botId].username} couldn't think how to draw it.`);
+		if (!stillDrawing()) return;
+		if (!art || !this.queueShapes(botId, art.shapes, art.seed)) this.endRound(`${s.players[botId].username} couldn't draw this turn.`);
 	}
 
 	// -------------------------------------------------------------------------

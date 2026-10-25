@@ -43,20 +43,56 @@ agents that drive the web page.
 
 In the lobby, the host clicks **Add bot** and picks a model. A room can have up to 4 bots.
 
-- **Guessing:** every 7 to 11 seconds, a bot looks at a PNG of the canvas (rendered on the server)
-  with a vision model and types a guess. The bot sees the letter hint and the guesses already made.
-- **Drawing:** on its turn, a bot picks a word and plans the picture as shapes. The plan streams in,
-  and the strokes replay over about 14 seconds so that everyone can watch it being drawn.
-- **Models:**
-  - Workers AI models see with Mistral Small 3.1, Llama 4 Scout or Llama 3.2 Vision. They all draw
-    with gpt-oss-120b, because it draws much better and its first shape arrives in about 1.5 seconds.
-  - GPT-5.4 mini, Claude Haiku 4.5 and Gemini 2.5 Flash run through AI Gateway and do both jobs.
+- **Models:** every bot uses one vision model, so it can see other people's drawings and its own.
+  The default is DeepSeek V4.1 Flash on Workers AI. Gemini 2.5 Flash, GPT-5.4 mini and Claude
+  Haiku 4.5 run through AI Gateway. These are the models whose drawings were recognisable in
+  testing (see below).
+- **Preparing a drawing** happens off-screen, before anyone sees it (`src/bots/artist.ts`):
+  1. DeepSeek writes a quick draft with thinking off (about 3 seconds) and, at the same time, a
+     careful plan with thinking on (10 to 15 seconds).
+  2. Each attempt is rendered exactly as it will appear, and Clef checks whether it reads as the word.
+  3. The first attempt Clef clearly recognises is shown, so a good draft appears within seconds.
+  4. If the draft isn't clear, the bot looks at it, is told what Clef mistook it for, and redraws,
+     while the careful plan is still thinking. The best attempt is used after 25 seconds at most, or sooner in short rounds.
+- **Clef** (`@cf/cloudflare/clef-flash`, a fast multimodal decision model) makes the quick calls.
+  Each call takes about half a second and costs a fraction of a cent:
+  - It picks the easiest of the offered words.
+  - It judges drawings by asking what each one shows, out of the word and 60 random words. It
+    counts as recognised only when the word is the top pick at 75% or more.
+  - When guessing, it ranks the built-in words that fit the letter hint, plus the bot's earlier
+    ideas. A confident pick is guessed straight away. Otherwise the vision model guesses freely,
+    which also covers custom words.
+- **Drawing:** shapes from bots and MCP agents get a hand-drawn wobble, and closed shapes overlap
+  where they start, so they look sketched rather than geometric. They replay over about 14 seconds.
+- **Guessing:** a bot first looks 5 to 8 seconds into the turn, then every 7 to 11 seconds. It sees
+  the letter hint and the guesses already made.
 - **Limits:**
   - Bots only play while at least one human or agent is connected.
-  - Each room can make 600 Workers AI calls and 150 third-party calls a day.
-  - A global daily budget caps all rooms together. The defaults are 20,000 Workers AI calls and
-    1,500 third-party calls (`AI_DAILY_FREE_CALLS` and `AI_DAILY_PAID_CALLS` in `wrangler.jsonc`).
-  - When the budget runs out, bots sit out: they stop guessing and skip their drawing turns.
+  - A bot's drawing turn costs up to 4 model calls (draft, careful plan, 2 redraws) plus a few Clef
+    checks. A guess costs one Clef call, plus one model call when Clef isn't sure.
+  - Each room can make 1,500 Workers AI calls, 300 third-party calls and 5,000 Clef calls a day.
+  - A global daily budget caps all rooms together. The defaults are 20,000 Workers AI calls, 1,500
+    third-party calls and 100,000 Clef calls (`AI_DAILY_*_CALLS` in `wrangler.jsonc`).
+  - When a bot's model runs out of budget, the bot sits out: it stops guessing and skips its
+    drawing turns. When Clef runs out, bots carry on without the checks, and every guess uses the
+    model (still at most 8 guesses per bot per round).
+
+**How the models were picked:** `scripts/bot-bench/` runs the models on the same words. It renders
+each drawing the way the game does and asks Clef what it shows, out of the word and 60 random
+words. Clef is a generous judge, so these scores flatter every model a little.
+
+| Model | Recognised | Time before drawing starts |
+|-------|------------|----------------------------|
+| DeepSeek V4.1 Flash, full pipeline (draft + careful plan + redraws) | 16/16 | 2–25 s, typically ~10 s |
+| DeepSeek V4.1 Flash, single draft with thinking off | 21/28 | ~4 s |
+| DeepSeek V4.1 Flash, single plan with thinking on | 27/28 | ~13 s |
+| Gemini 2.5 Flash, low reasoning effort | 11/12 | ~8 s |
+| GPT-5.4 mini, with redraws | 11/12 | ~6 s |
+| Claude Haiku 4.5, with redraws | 8/12 | ~8 s |
+| Mistral Small 3.1 (dropped) | 2/12 | ~18 s |
+| Llama 4 Scout (dropped) | 1/12 | ~5 s |
+
+"Recognised" means Clef's top pick, at any probability; the game's gate is stricter (75%).
 
 **Modes:** the host can choose free-for-all, **Teams** (humans and bots mixed across two teams) or
 **Humans vs AI**. In team modes, the drawer alternates between teams and team scores add up.
@@ -184,14 +220,15 @@ Run `npm run cf-typegen` after you change `wrangler.jsonc`.
 │   ├── game/logic.ts          # Pure helpers: matching, hints, scoring, validation
 │   ├── game/shapes.ts         # Shapes (from bots and agents) → draw ops
 │   ├── game/raster.ts         # Server-side canvas → PNG, for bots and view_canvas
-│   ├── bots/brain.ts          # Model list, prompts, vision guessing, streamed drawing plans
+│   ├── bots/brain.ts          # Model list, prompts, Clef calls, vision guesses
+│   ├── bots/artist.ts         # Off-screen drawing: draft vs careful plan, Clef check, redraws
 │   ├── mcp.ts                 # Remote MCP server for agents
 │   ├── client/styles.css      # Tailwind source → public/styles.css
 │   └── utils/                 # IDs, word list
 ├── public/                    # index.html, game.js, favicon, _headers (CSP and security headers)
 ├── test/                      # Vitest (unit + Durable Object integration)
 ├── e2e/                       # Playwright end-to-end scripts
-├── scripts/                   # screenshots.mjs and demo.mjs regenerate the README images
+├── scripts/                   # screenshots.mjs, demo.mjs (README images), bot-bench/ (bot drawing benchmark)
 └── wrangler.jsonc
 ```
 

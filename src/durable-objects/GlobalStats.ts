@@ -23,6 +23,9 @@ const MAX_PLAYERS = 10;
  * A single, tiny directory of live rooms for the home page. Rooms push updates
  * over RPC only when their player count or phase changes, so load stays low.
  */
+/** What an AI call is charged to (see spendAi). */
+export type AiSpendKind = 'free' | 'paid' | 'clef';
+
 export class GlobalStatsObject extends DurableObject<Env> {
 	private rooms: Map<string, RoomInfo>;
 
@@ -72,16 +75,23 @@ export class GlobalStatsObject extends DurableObject<Env> {
 
 	/**
 	 * Daily AI call budget across all rooms, so a busy (or abusive) day can't run up a bill.
-	 * Returns false once today's allowance for that kind of model is spent. Resets at 00:00 UTC.
+	 * Returns false once today's allowance for that kind of call is spent. Resets at 00:00 UTC.
+	 * Kinds: Workers AI models ("free" tier, still billed past the free allowance), third-party
+	 * models ("paid"), and Clef judgements ("clef": tiny, so they get a much bigger allowance).
 	 */
-	async spendAi(paid: boolean): Promise<boolean> {
+	async spendAi(kind: AiSpendKind): Promise<boolean> {
 		const day = new Date().toISOString().slice(0, 10);
-		const budget = this.ctx.storage.kv.get<{ day: string; free: number; paid: number }>('ai') ?? { day, free: 0, paid: 0 };
-		if (budget.day !== day) Object.assign(budget, { day, free: 0, paid: 0 });
-		const limit = Number(paid ? this.env.AI_DAILY_PAID_CALLS : this.env.AI_DAILY_FREE_CALLS) || (paid ? 1500 : 20000);
-		const key = paid ? 'paid' : 'free';
-		if (budget[key] >= limit) return false;
-		budget[key]++;
+		const budget = this.ctx.storage.kv.get<{ day: string; free: number; paid: number; clef?: number }>('ai') ?? { day, free: 0, paid: 0, clef: 0 };
+		if (budget.day !== day) Object.assign(budget, { day, free: 0, paid: 0, clef: 0 });
+		const limits = {
+			free: Number(this.env.AI_DAILY_FREE_CALLS) || 20000,
+			paid: Number(this.env.AI_DAILY_PAID_CALLS) || 1500,
+			clef: Number(this.env.AI_DAILY_CLEF_CALLS) || 100000,
+		};
+		const key = kind;
+		budget[key] ??= 0;
+		if (budget[key]! >= limits[key]) return false;
+		budget[key]!++;
 		this.ctx.storage.kv.put('ai', budget);
 		return true;
 	}
