@@ -86,6 +86,14 @@ describe('prepareDrawing', () => {
 		expect(Date.now() - t0).toBeLessThan(1_000);
 	});
 
+	it('shows a late draft at once rather than waiting for the careful plan', async () => {
+		const { brain } = fakeBrain({ draft: { shapes: shape('red'), ms: 300 }, careful: { shapes: shape('green'), ms: 2_000 }, verdicts: {} });
+		const t0 = Date.now();
+		const art = await prepareDrawing(brain, deepseek, 'x', hooks({ deadline: Date.now() + 100, giveUpAt: Date.now() + 3_000 }));
+		expect(fillOf(art?.shapes)).toBe('#ef4444');
+		expect(Date.now() - t0).toBeLessThan(1_000);
+	});
+
 	it('lets the careful plan win while the draft hangs', async () => {
 		const { brain } = fakeBrain({ draft: { shapes: shape('red'), ms: 60_000 }, careful: { shapes: shape('green'), ms: 50 }, verdicts: { '#22c55e': { p: 0.3, rank: 3 } } });
 		const t0 = Date.now();

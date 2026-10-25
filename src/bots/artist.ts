@@ -84,8 +84,7 @@ export async function prepareDrawing(brain: Brain, model: BotModel, word: string
 		const seed = Math.floor(Math.random() * 2 ** 31);
 		const png = await opsToPngBase64(shapesToOps(shapes, 1, LIMITS.maxOpsPerRound, { freehand: true, rand: seededRandom(seed) }), 0.5);
 		// Judging is an improvement step, so it never runs past the soft deadline.
-		const budget = untilSoft();
-		const verdict = budget > 0 && (await hooks.spend('clef')) ? await within(brain.judge(png, word).catch(() => null), null, budget) : null;
+		const verdict = untilSoft() > 0 && (await hooks.spend('clef')) ? await within(brain.judge(png, word).catch(() => null), null, untilSoft()) : null;
 		const art: Artwork = { shapes, seed, verdict, png, source, attempts };
 		// An unjudged attempt only beats nothing: never replace a judged one with it.
 		if (!best || (verdict && verdict.p > (best.verdict?.p ?? -1))) best = art;
@@ -93,7 +92,8 @@ export async function prepareDrawing(brain: Brain, model: BotModel, word: string
 	};
 	/**
 	 * Stop at the first clearly recognised attempt. Without any verdict at all (Clef down, out of
-	 * budget, or out of time), the first drawable attempt is accepted as is.
+	 * budget, or out of time), the first drawable attempt is accepted as is: past the soft deadline
+	 * the turn is already running late, so showing something beats waiting for a better plan.
 	 */
 	const done = (a: Artwork | null) => !!a && (a.verdict ? isRecognised(a.verdict) : !best?.verdict);
 

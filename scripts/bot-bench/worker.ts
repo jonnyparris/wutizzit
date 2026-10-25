@@ -14,7 +14,7 @@ export default {
 				active: () => true,
 				spend: async () => true,
 				// Same timing as the game for a round of `d` seconds (default 60).
-				...botPrepTiming(Date.now() + (Number(u.searchParams.get('d')) || 60) * 1000),
+				...botPrepTiming(Date.now() + (Number(u.searchParams.get('d')) > 0 ? Number(u.searchParams.get('d')) : 60) * 1000),
 				maxRevisions: Number(u.searchParams.get('r') ?? 2),
 			});
 			if (!art) return Response.json({ word, model: id, error: 'no drawing' });
