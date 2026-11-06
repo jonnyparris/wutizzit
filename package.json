@@ -13,7 +13,7 @@
 		"test:watch": "vitest",
 		"typecheck": "tsc --noEmit",
 		"cf-typegen": "wrangler types",
-		"test:e2e": "node e2e/game-flow.mjs && node e2e/owner-controls.mjs"
+		"test:e2e": "node e2e/game-flow.mjs && node e2e/owner-controls.mjs && node e2e/spectate.mjs"
 	},
 	"devDependencies": {
 		"@cloudflare/vitest-plugin": "^1.4.7",

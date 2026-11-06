@@ -27,6 +27,9 @@ It runs entirely on Cloudflare Workers and Durable Objects.
 4. Everyone else types guesses into the chat. The faster you guess, the more you score.
 5. After the last round, the results screen shows the podium.
 
+Only want to watch? Open the room link and click **Watch**, or click **Just watch** in the lobby.
+To watch the bots play each other, create a room, click **Just watch**, add 2 to 4 bots and start.
+
 <table>
   <tr>
     <td><img src="docs/screenshots/lobby.png" alt="Lobby with host settings: rounds, draw time, word choices and custom words" /></td>
@@ -67,7 +70,8 @@ In the lobby, the host clicks **Add bot** and picks a model. A room can have up 
 - **Guessing:** a bot first looks 5 to 8 seconds into the turn, then every 7 to 11 seconds. It sees
   the letter hint and the guesses already made.
 - **Limits:**
-  - Bots only play while at least one human or agent is connected.
+  - Bots only play while at least one human or agent is connected. A watcher counts, so bots can
+    play a whole game against each other while people watch.
   - A bot's drawing turn costs up to 4 model calls (draft, careful plan, 2 redraws) plus a few Clef
     checks. A guess costs one Clef call, plus one model call when Clef isn't sure.
   - Each room can make 1,500 Workers AI calls, 300 third-party calls and 5,000 Clef calls a day.
@@ -129,7 +133,7 @@ A browser agent then plays as that tab's player. Scripts can call the tools dire
 ## Features
 
 **Game**
-- 2 to 20 players per room.
+- 2 to 20 players per room, plus up to 30 people watching.
 - Host settings:
   - Rounds come in multiples of the player count, so everyone draws equally often (unless someone joins mid-game).
   - Draw time of 30 seconds to 3 minutes.
@@ -151,6 +155,10 @@ A browser agent then plays as that tab's player. Scripts can call the tools dire
 - Players who join mid-round see the full drawing.
 - The host can pause, and can remove a player. The ban applies to the player's network (IP address) for 10 minutes, so others on the same Wi-Fi are blocked too.
 - If the host leaves, another player becomes the host.
+- **Watching:** a watcher has no seat, so a full room can still be watched. Watchers see the word,
+  never draw, guess or score, and get no team. While someone draws, their chat goes only to the
+  drawer, the players who guessed, and other watchers, so it can't give the word away. You can
+  switch between playing and watching in the lobby.
 
 **Interface**
 - Clean, responsive layout that works on phones (chat sits under the canvas, the timer stays pinned).
@@ -186,9 +194,10 @@ Browser ──HTTP──▶ Worker (src/index.ts)
 
 - Each player has a public `id`, which everyone sees, and a secret `token`, which only they hold.
   All game actions go over the authenticated socket. Actions include `start`, `choose`, `draw`,
-  `chat`, `pause`, `kick` and `leave`.
-- The server sends each player their own `state` snapshot. The drawer sees the word. Guessers see
-  only the masked hint. Correct guesses are never echoed to other players.
+  `chat`, `pause`, `kick`, `spectate` and `leave`. `POST /rooms/:code/join` with
+  `"spectate": true` joins as a watcher.
+- The server sends each player their own `state` snapshot. The drawer and watchers see the word.
+  Guessers see only the masked hint. Correct guesses are never echoed to other players.
 - Drawing is sent as batched ops (`line`, `fill`, `undo`, `clear`), at most one message per
   animation frame. Every client keeps the same op log, so undo and late joins render identically.
 - Empty rooms delete their storage after 10 minutes.

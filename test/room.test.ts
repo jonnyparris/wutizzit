@@ -170,6 +170,146 @@ describe('rooms API', () => {
 	});
 });
 
+describe('spectators', () => {
+	it('lets people watch a full room without taking a seat', async () => {
+		const created = await post('/rooms');
+		const roomId: string = created.body.roomId;
+		for (let i = 0; i < LIMITS.maxPlayers; i++) expect((await post(`/rooms/${roomId}/join`, { username: `P${i}` }, randomIp())).status).toBe(200);
+		const full = await post(`/rooms/${roomId}/join`, { username: 'Late' }, randomIp());
+		expect(full.status).toBe(409);
+		expect(full.body.error).toMatch(/still watch/);
+		const watcher = await post(`/rooms/${roomId}/join`, { username: 'Late', spectate: true }, randomIp());
+		expect(watcher.status).toBe(200);
+		const client = await Client.connect(roomId, watcher.body.token);
+		const s = await client.state();
+		expect(s.you.spectator).toBe(true);
+		expect(s.players.filter((p: any) => !p.spectator)).toHaveLength(LIMITS.maxPlayers);
+		expect(s.players.find((p: any) => p.id === watcher.body.playerId).spectator).toBe(true);
+		// A watcher can't take a seat while the room is full.
+		client.send({ type: 'spectate', on: false });
+		await client.next((m) => m.type === 'notice' && /room is full/.test(m.text));
+	});
+
+	it('never draws, guesses or scores, sees the word, and chats only with people who know it', async () => {
+		const { roomId, players } = await setupRoom(['Alice', 'Bob']);
+		const [alice, bob] = players;
+		const joined = await post(`/rooms/${roomId}/join`, { username: 'Cara', spectate: true });
+		const cara = await Client.connect(roomId, joined.body.token);
+		await cara.next((m) => m.type === 'welcome');
+
+		// Watchers don't count towards the two players needed to start.
+		bob.client.send({ type: 'spectate', on: true });
+		await alice.client.state((s) => s.players.filter((p: any) => p.spectator).length === 2);
+		alice.client.send({ type: 'start' });
+		await alice.client.next((m) => m.type === 'notice' && /at least 2 players/.test(m.text));
+		bob.client.send({ type: 'spectate', on: false });
+		await alice.client.state((s) => s.players.filter((p: any) => p.spectator).length === 1);
+
+		const { drawer, guessers, word } = await startDrawing([alice, bob], { maxRounds: 2 });
+		const view = await cara.state((s) => s.phase === 'drawing');
+		expect(view.round.word).toBe(word);
+		expect([drawer.playerId, ...guessers.map((g) => g.playerId)]).not.toContain(joined.body.playerId);
+
+		// Switching sides is for the lobby only.
+		cara.send({ type: 'spectate', on: false });
+		await cara.next((m) => m.type === 'notice' && /in the lobby/.test(m.text));
+
+		// Saying the word is chat, not a guess, and only people who know the word see it.
+		cara.send({ type: 'chat', text: word });
+		const seen = await drawer.client.next((m) => m.type === 'chat' && m.msg.username === 'Cara');
+		expect(seen.msg.round).toBe(1);
+		await sleep(50);
+		expect(guessers[0].client.messages.some((m) => m.type === 'chat' && m.msg.username === 'Cara')).toBe(false);
+
+		// The only real guesser ends the round: the watcher isn't waited on.
+		guessers[0].client.send({ type: 'chat', text: word });
+		const inter = await cara.state((s) => s.phase === 'intermission');
+		expect(inter.lastRound.scoreUpdates.map((u: any) => u.username)).toEqual([guessers[0].username]);
+		expect(inter.players.find((p: any) => p.username === 'Cara').score).toBe(0);
+
+		// Round 2 goes to the other player, never the watcher; final scores leave the watcher out.
+		await inRoom(roomStub(roomId), async (obj) => obj.nextRoundOrFinish());
+		const r2 = await cara.state((s) => s.phase === 'choosing' && s.roundNumber === 2);
+		expect(r2.round.drawerId).toBe(guessers[0].playerId);
+		await inRoom(roomStub(roomId), async (obj) => {
+			obj.endRound('test');
+			obj.nextRoundOrFinish();
+		});
+		const done = await cara.state((s) => s.phase === 'lobby' && !!s.results);
+		expect(done.results.finalScores.map((f: any) => f.username).sort()).toEqual(['Alice', 'Bob']);
+	});
+
+	it('caps watchers separately, and counts only seated players in the room summary', async () => {
+		const { roomId, players } = await setupRoom(['Alice']);
+		for (let i = 0; i < LIMITS.maxSpectators; i++) expect((await post(`/rooms/${roomId}/join`, { username: `W${i}`, spectate: true }, randomIp())).status).toBe(200);
+		const over = await post(`/rooms/${roomId}/join`, { username: 'Extra', spectate: true }, randomIp());
+		expect(over.status).toBe(409);
+		expect(over.body.error).toMatch(/watching/);
+		// The player can't become a watcher either while the watcher seats are full.
+		players[0].client.send({ type: 'spectate', on: true });
+		await players[0].client.next((m) => m.type === 'notice' && /Too many people are watching/.test(m.text));
+		// Seats are still free, so the summary counts players only.
+		const summary = await api(`/rooms/${roomId}`);
+		expect(summary.body.playerCount).toBe(1);
+		expect((await post(`/rooms/${roomId}/join`, { username: 'Bob' }, randomIp())).status).toBe(200);
+	});
+
+	it('keeps watchers out of teams and the drawing rotation', async () => {
+		const { roomId, players } = await setupRoom(['Alice', 'Bob', 'Dan']);
+		const joined = await post(`/rooms/${roomId}/join`, { username: 'Cara', spectate: true });
+		const cara = await Client.connect(roomId, joined.body.token);
+		await cara.next((m) => m.type === 'welcome');
+		players[0].client.send({ type: 'start', settings: { maxRounds: 3, roundDuration: 60, mode: 'teams' } });
+		const s = await cara.state((x) => x.phase === 'choosing');
+		expect(s.players.find((p: any) => p.username === 'Cara').team).toBeNull();
+		expect(s.players.filter((p: any) => p.team)).toHaveLength(3);
+		// A watcher who arrives mid-game gets no team either.
+		const late = await post(`/rooms/${roomId}/join`, { username: 'Eve', spectate: true });
+		const eve = await Client.connect(roomId, late.body.token);
+		await eve.next((m) => m.type === 'welcome');
+		const drawers: string[] = [];
+		for (let round = 1; round <= 3; round++) {
+			const r = await cara.state((x) => x.phase === 'choosing' && x.roundNumber === round);
+			drawers.push(r.round.drawerId);
+			await inRoom(roomStub(roomId), async (obj) => {
+				obj.endRound('test');
+				obj.nextRoundOrFinish();
+			});
+		}
+		expect(drawers).not.toContain(joined.body.playerId);
+		expect(drawers).not.toContain(late.body.playerId);
+		const after = await eve.state((x) => x.phase === 'lobby' && !!x.results);
+		expect(after.players.find((p: any) => p.username === 'Eve').team).toBeNull();
+	});
+
+	it('hands the host to a seated player before a watcher, and rate-limits switching', async () => {
+		const { roomId, players } = await setupRoom(['Alice']);
+		const joined = await post(`/rooms/${roomId}/join`, { username: 'Cara', spectate: true });
+		const cara = await Client.connect(roomId, joined.body.token);
+		await cara.next((m) => m.type === 'welcome');
+		const bob = await post(`/rooms/${roomId}/join`, { username: 'Bob' });
+		const bobClient = await Client.connect(roomId, bob.body.token);
+		await bobClient.next((m) => m.type === 'welcome');
+		players[0].client.send({ type: 'leave' });
+		const s = await cara.state((x) => !x.players.some((p: any) => p.username === 'Alice'));
+		expect(s.ownerId).toBe(bob.body.playerId);
+
+		for (let i = 0; i < 4; i++) cara.send({ type: 'spectate', on: i % 2 === 1 });
+		await cara.next((m) => m.type === 'notice' && /Slow down/.test(m.text));
+	});
+
+	it('ends the game when a watcher is all that is left with one player', async () => {
+		const { roomId, players } = await setupRoom(['Alice', 'Bob']);
+		const joined = await post(`/rooms/${roomId}/join`, { username: 'Cara', spectate: true });
+		const cara = await Client.connect(roomId, joined.body.token);
+		await cara.next((m) => m.type === 'welcome');
+		await startDrawing(players);
+		players[1].client.send({ type: 'leave' });
+		const s = await cara.state((x) => x.phase === 'lobby' && !!x.results);
+		expect(s.results.reason).toBe('Not enough players');
+	});
+});
+
 describe('game flow', () => {
 	it('plays a round end to end without leaking the word', async () => {
 		const { roomId, players } = await setupRoom(['Alice', 'Bob', 'Cara']);

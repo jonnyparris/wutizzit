@@ -399,6 +399,42 @@ describe('bots', () => {
 		const summary = await roomStub(roomId).summary();
 		expect(summary.playerCount).toBe(0);
 	});
+
+	it('plays a bots-only match while the host watches', async () => {
+		const { roomId, client, playerId } = await humanRoom('Host');
+		const answer: FakeAnswers = {};
+		await installFakeBrain(roomId, answer);
+		client.send({ type: 'spectate', on: true });
+		await client.state((x) => x.you.spectator);
+		// One bot isn't a match.
+		client.send({ type: 'add-bot' });
+		await client.state((x) => x.players.length === 2);
+		client.send({ type: 'start', settings: { maxRounds: 2, roundDuration: 60 } });
+		await client.next((m) => m.type === 'notice' && /at least 2 players/.test(m.text));
+		client.send({ type: 'add-bot' });
+		await client.state((x) => x.players.length === 3);
+
+		client.send({ type: 'start', settings: { maxRounds: 2, roundDuration: 60 } });
+		let s = await client.state((x) => x.phase === 'choosing');
+		expect(s.round.drawerId).not.toBe(playerId);
+		expect(s.round.choices).toBeNull();
+		await stepBots(roomId); // the drawing bot picks a word
+		s = await client.state((x) => x.phase === 'drawing');
+		// The watcher sees the word; the guessing bot will get there.
+		expect(s.round.word).toBeTruthy();
+		answer.word = s.round.word;
+		await stepBots(roomId); // the drawing bot plans and replays
+		await client.next((m) => m.type === 'draw', 5000);
+		await sleep(300);
+		await stepBots(roomId); // the guessing bot's first idea is wrong ("nope")…
+		await client.next((m) => m.type === 'chat' && m.msg.text === 'nope');
+		await stepBots(roomId); // …then it gets the word
+		await client.next((m) => m.type === 'chat' && m.msg.kind === 'correct');
+		s = await client.state((x) => x.phase === 'intermission');
+		expect(s.lastRound.scoreUpdates).toHaveLength(1);
+		expect(s.players.find((p: any) => p.id === playerId)).toMatchObject({ spectator: true, score: 0 });
+		expect(s.players.filter((p: any) => p.kind === 'bot' && p.score > 0)).toHaveLength(2);
+	}, 15_000);
 });
 
 describe('bot budget', () => {
