@@ -204,8 +204,8 @@
 					</div>
 
 					<aside class="flex flex-col gap-4 lg:sticky lg:top-6">
-						<!-- On phones the chat sits right under the canvas so guessing doesn't need scrolling. -->
-						<div class="card order-1 lg:order-2 flex flex-col">
+						<!-- Chat comes before players so the guess box stays on screen without scrolling. -->
+						<div class="card flex flex-col">
 							<div class="panel-head">Chat</div>
 							<div id="chat-messages" class="chat" role="log" aria-live="polite"></div>
 							<form id="chat-form" class="p-3 border-t border-line flex gap-2" autocomplete="off">
@@ -214,13 +214,13 @@
 							</form>
 						</div>
 
-						<div class="card order-2 lg:order-1">
+						<div class="card">
 							<div class="panel-head">Players <span id="player-count" class="text-muted font-medium"></span></div>
 							<div id="team-bar" class="team-bar hidden" aria-live="polite"></div>
 							<ul id="players-list" class="p-2"></ul>
 						</div>
 
-						<div class="order-3 flex gap-2">
+						<div class="flex gap-2">
 							<button id="pause-game-btn" class="btn btn-secondary flex-1 hidden"></button>
 							<button id="leave-room-btn" class="btn btn-ghost flex-1 text-danger"><svg class="icon icon-sm"><use href="#i-logout" /></svg><span>Leave room</span></button>
 						</div>
