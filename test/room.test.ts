@@ -1,6 +1,7 @@
 import { env, evictDurableObject, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { exports } from 'cloudflare:workers';
 import { describe, expect, it } from 'vitest';
+import { LIMITS } from '../src/game/logic';
 
 const BASE = 'https://wutizzit.test';
 const worker = () => (exports as unknown as { default: Fetcher }).default;
@@ -127,6 +128,25 @@ describe('rooms API', () => {
 		const { roomId } = await setupRoom(['Alice']);
 		const dup = await post(`/rooms/${roomId}/join`, { username: 'alice' });
 		expect(dup.status).toBe(409);
+	});
+
+	it('caps a room at LIMITS.maxPlayers and still lets members rejoin', async () => {
+		const created = await post('/rooms');
+		const roomId: string = created.body.roomId;
+		const tokens: string[] = [];
+		for (let i = 0; i < LIMITS.maxPlayers; i++) {
+			const joined = await post(`/rooms/${roomId}/join`, { username: `P${i}` }, randomIp());
+			expect(joined.status).toBe(200);
+			tokens.push(joined.body.token);
+		}
+		const full = await post(`/rooms/${roomId}/join`, { username: 'Late' }, randomIp());
+		expect(full.status).toBe(409);
+		const again = await post(`/rooms/${roomId}/join`, { username: 'P0', token: tokens[0] }, randomIp());
+		expect(again.status).toBe(200);
+		const client = await Client.connect(roomId, tokens[0]);
+		const state = await client.state();
+		expect(state.maxPlayers).toBe(LIMITS.maxPlayers);
+		expect(state.players).toHaveLength(LIMITS.maxPlayers);
 	});
 
 	it('lets a player rejoin with their token and keep their identity', async () => {

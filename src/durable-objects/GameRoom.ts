@@ -1438,6 +1438,7 @@ export class GameRoomObject extends DurableObject<Env> {
 			settings: s.settings,
 			roundNumber: s.roundNumber,
 			maxRounds: s.settings.maxRounds,
+			maxPlayers: LIMITS.maxPlayers,
 			remaining,
 			paused: s.pausedAt !== null,
 			players: s.order.map((id) => {

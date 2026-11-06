@@ -129,7 +129,7 @@ A browser agent then plays as that tab's player. Scripts can call the tools dire
 ## Features
 
 **Game**
-- 2 to 10 players per room.
+- 2 to 20 players per room.
 - Host settings:
   - Rounds come in multiples of the player count, so everyone draws equally often (unless someone joins mid-game).
   - Draw time of 30 seconds to 3 minutes.
