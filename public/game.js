@@ -1051,7 +1051,7 @@ class GameClient {
 			);
 		}
 		const sorted = [...s.players].sort((a, b) => b.score - a.score);
-		this.el.playerCount.textContent = `${s.players.length}/20`;
+		this.el.playerCount.textContent = `${s.players.length}/${s.maxPlayers}`;
 		// Skip identical rebuilds so a focused kick button keeps focus.
 		const key = JSON.stringify([sorted, s.you, s.ownerId]);
 		if (key === this.playersKey) return;
