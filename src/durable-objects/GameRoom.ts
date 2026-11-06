@@ -1,5 +1,8 @@
 import { DurableObject } from 'cloudflare:workers';
 import {
+	botHandicap,
+	estimateTokens,
+	throttleDelayMs,
 	cleanChat,
 	cleanCustomWords,
 	cleanDrawOp,
@@ -25,7 +28,7 @@ import { pickWords, WORDS } from '../utils/words';
 
 import { opsToPngBase64, visibleOps } from '../game/raster';
 import { cleanShapes, seededRandom, shapesToOps, type Shape } from '../game/shapes';
-import { BOT_MODELS, createBrain, DEFAULT_BOT_MODEL, findModel, type Brain, type BotModel } from '../bots/brain';
+import { BOT_MODELS, createBrain, DEFAULT_BOT_MODEL, findModel, GUESS_MAX_TOKENS, type Brain, type BotModel } from '../bots/brain';
 import { botPrepTiming, prepareDrawing, type Artwork } from '../bots/artist';
 import type { AiSpendKind } from './GlobalStats';
 
@@ -125,6 +128,8 @@ interface BotRec {
 	ideas?: string[];
 	/** UTC day the bot last ran out of AI budget, so it says so once and retries after the reset. */
 	outOfBudget: string | false;
+	/** A guess held back by the room's token-rate cap. The alarm posts it at `nextAt`. */
+	pending?: string | null;
 }
 
 interface ScoreUpdate {
@@ -889,6 +894,12 @@ export class GameRoomObject extends DurableObject<Env> {
 		s.results = null;
 		s.lastRound = null;
 		this.system('Game started. Good luck!');
+		if (s.settings.botSkill !== 'strong' && s.order.some((id) => s.players[id].kind === 'bot')) {
+			const h = botHandicap(s.settings.botSkill);
+			this.system(
+				`Bots are on ${s.settings.botSkill}: humans get a ${h.headStartMs / 1000} s head start, bots answer at most ${h.tokensPerSecond} tokens a second${h.seesHint ? '' : ' and never see the letter hint'}.`,
+			);
+		}
 		this.startRound();
 		await this.commit();
 	}
@@ -953,7 +964,7 @@ export class GameRoomObject extends DurableObject<Env> {
 		s.bots[bot.id] = { round: 0, nextAt: null, guesses: 0, planned: false, tried: [], outOfBudget: false };
 		if (s.phase !== 'lobby') {
 			s.drawQueue.push(bot.id);
-			if (s.phase === 'drawing') s.bots[bot.id].nextAt = Date.now() + between(BOT_FIRST_LOOK_MS);
+			if (s.phase === 'drawing') s.bots[bot.id].nextAt = this.firstLookAt(Date.now());
 		}
 		this.system(`${username} joined (${model.label})`);
 		this.broadcastState();
@@ -1020,6 +1031,18 @@ export class GameRoomObject extends DurableObject<Env> {
 				}
 				continue;
 			}
+			if (b.pending) {
+				// A held-back guess is due: post it, then look again after the usual pause.
+				const text = b.pending;
+				b.pending = null;
+				if (s.phase !== 'drawing' || round.guessed.includes(id)) continue;
+				b.nextAt = now + between(BOT_GUESS_EVERY_MS);
+				const roundNumber = round.number;
+				this.think(id, async () => {
+					if (this.stillGuessing(id, roundNumber)) await this.onChat(id, text);
+				});
+				continue;
+			}
 			if (s.phase !== 'drawing' || round.guessed.includes(id) || b.guesses >= BOT_MAX_GUESSES || b.outOfBudget === today) continue;
 			b.nextAt = now + between(BOT_GUESS_EVERY_MS);
 			// Nothing worth looking at yet.
@@ -1039,9 +1062,19 @@ export class GameRoomObject extends DurableObject<Env> {
 			if (s.players[id].kind !== 'bot') continue;
 			const b = (s.bots[id] ??= { round: 0, nextAt: null, guesses: 0, planned: false, tried: [], outOfBudget: false });
 			if (b.round !== round.number) Object.assign(b, { round: round.number, guesses: 0, planned: false, tried: [], ideas: [] });
+			// Guesses are only held during drawing, so a new phase never inherits one (round numbers restart each game).
+			b.pending = null;
 			if (round.drawerId === id) b.nextAt = now + (s.phase === 'choosing' ? BOT_CHOOSE_MS : 600);
-			else b.nextAt = s.phase === 'drawing' ? now + between(BOT_FIRST_LOOK_MS) : null;
+			else b.nextAt = s.phase === 'drawing' ? this.firstLookAt(now) : null;
 		}
+	}
+
+	/** When a guessing bot first looks at the drawing: its reaction time, plus the room's head start for humans. */
+	private firstLookAt(now: number): number {
+		const s = this.state!;
+		const { headStartMs } = botHandicap(s.settings.botSkill);
+		const drawStart = s.round?.drawStartedAt ?? now;
+		return Math.max(now, drawStart + headStartMs) + between(BOT_FIRST_LOOK_MS);
 	}
 
 	/** Runs a model call off the alarm, marking the bot as thinking. Errors never break the room. */
@@ -1128,6 +1161,8 @@ export class GameRoomObject extends DurableObject<Env> {
 	private async botGuess(botId: string, roundNumber: number) {
 		const model = this.botModel(botId);
 		if (!this.stillGuessing(botId, roundNumber)) return;
+		const startedAt = Date.now();
+		const handicap = botHandicap(this.state!.settings.botSkill);
 		const round = this.state!.round!;
 		const word = round.word!;
 		const png = await this.canvasPng(0.5);
@@ -1135,29 +1170,46 @@ export class GameRoomObject extends DurableObject<Env> {
 		const others = this.state!.chat.filter((m) => m.kind === 'chat' && m.round === undefined && m.ts >= (round.drawStartedAt ?? 0)).map((m) => m.text);
 		const tried = [...new Set([...b.tried, ...others])];
 		const fresh = (g: string) => !tried.some((t) => normalizeGuess(t) === normalizeGuess(g));
-		const mask = maskWord(word, round.revealed);
-		const shortlist = [...new Set([...(b.ideas ?? []), ...WORDS])].filter((w) => fitsMask(w, mask) && fresh(w));
+		// Without the hint, Clef can't narrow the built-in words down, so it only ranks the bot's own ideas.
+		const mask = handicap.seesHint ? maskWord(word, round.revealed) : null;
+		const shortlist = mask
+			? [...new Set([...(b.ideas ?? []), ...WORDS])].filter((w) => fitsMask(w, mask) && fresh(w))
+			: [...new Set(b.ideas ?? [])].filter(fresh);
 
 		let pick: string | undefined;
+		let tokens = 0;
 		if (shortlist.length && (await this.spendAi(botId, 'clef'))) {
 			try {
 				const ranked = await this.brain.pick(png, shortlist);
-				if (ranked.choice && ranked.p >= BOT_CONFIDENT) pick = ranked.choice;
+				if (ranked.choice && ranked.p >= BOT_CONFIDENT) {
+					pick = ranked.choice;
+					tokens = estimateTokens(pick);
+				}
 			} catch (err) {
 				console.warn(JSON.stringify({ msg: 'bot clef pick failed', error: String(err) }));
 			}
 		}
 		if (!pick) {
 			if (!this.stillGuessing(botId, roundNumber) || !(await this.spendAi(botId, model.paid ? 'paid' : 'free'))) return;
-			const hint = [...mask].join(' ');
-			const letters = [...word].filter((c) => /[\p{L}\p{N}]/u.test(c)).length;
-			const ideas = await this.brain.guess(model, { png, hint, letters, tried });
+			const hint = mask ? [...mask].join(' ') : null;
+			const letters = mask ? [...word].filter((c) => /[\p{L}\p{N}]/u.test(c)).length : null;
+			const reply = await this.brain.guess(model, { png, hint, letters, tried });
 			if (!this.stillGuessing(botId, roundNumber)) return;
-			b.ideas = [...new Set([...(b.ideas ?? []), ...ideas])].slice(-30);
-			pick = ideas.find(fresh);
+			b.ideas = [...new Set([...(b.ideas ?? []), ...reply.guesses])].slice(-30);
+			pick = reply.guesses.find(fresh);
+			// Hidden reasoning can report far more tokens than the reply; count at most the reply budget.
+			tokens = Math.min(reply.tokens, GUESS_MAX_TOKENS);
 		}
 		if (!pick || !this.stillGuessing(botId, roundNumber)) return;
 		b.tried.push(pick);
+		// Handicapped bots answer no faster than they could write their reply at the room's token rate.
+		// The alarm posts the held-back guess, so it survives hibernation and pauses.
+		const wait = throttleDelayMs(startedAt, tokens, handicap.tokensPerSecond, Date.now());
+		if (wait > 0) {
+			b.pending = pick;
+			b.nextAt = Date.now() + wait;
+			return;
+		}
 		await this.onChat(botId, pick);
 	}
 

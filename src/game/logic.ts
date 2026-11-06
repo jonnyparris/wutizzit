@@ -154,15 +154,50 @@ export type GameMode = 'ffa' | 'teams';
 /** How teams are formed: mixed (balanced, humans and AI on both sides) or humans against the AI players. */
 export type TeamSplit = 'mixed' | 'humans-vs-ai';
 
+/**
+ * How hard the bots play. "strong" is full speed. The handicaps give humans a head start, cap
+ * how fast a bot can answer (5 tokens a second), and on "weak" hide the letter hint from bots.
+ * The numbers are repeated in the lobby tooltip, the MCP/WebMCP tool text and the README.
+ */
+export type BotSkill = 'strong' | 'medium' | 'weak';
+export const BOT_SKILLS: readonly BotSkill[] = ['strong', 'medium', 'weak'];
+
+export interface BotHandicap {
+	/** Extra wait before a bot's first look at a drawing, on top of its normal reaction time. */
+	headStartMs: number;
+	/** A bot's guess appears no sooner than its model reply could be written at this many tokens a second. */
+	tokensPerSecond: number | null;
+	/** Whether bots see the letter pattern ("_ _ _ e") and the word length. */
+	seesHint: boolean;
+}
+
+export function botHandicap(skill: BotSkill): BotHandicap {
+	if (skill === 'weak') return { headStartMs: 10_000, tokensPerSecond: 5, seesHint: false };
+	if (skill === 'medium') return { headStartMs: 10_000, tokensPerSecond: 5, seesHint: true };
+	return { headStartMs: 0, tokensPerSecond: null, seesHint: true };
+}
+
+/** Rough token count of model output when the provider doesn't report usage (~4 characters a token). */
+export function estimateTokens(text: string): number {
+	return Math.max(1, Math.ceil(text.length / 4));
+}
+
+/** How much longer a bot must wait before posting a guess, so it never answers faster than `tokensPerSecond`. */
+export function throttleDelayMs(startedAt: number, tokens: number, tokensPerSecond: number | null, now: number): number {
+	if (!tokensPerSecond || tokensPerSecond <= 0) return 0;
+	return Math.max(0, Math.round(startedAt + (tokens * 1000) / tokensPerSecond - now));
+}
+
 export interface Settings {
 	maxRounds: number;
 	roundDuration: number;
 	wordChoiceCount: number;
 	mode: GameMode;
 	teamSplit: TeamSplit;
+	botSkill: BotSkill;
 }
 
-export const DEFAULT_SETTINGS: Settings = { maxRounds: 10, roundDuration: 60, wordChoiceCount: 3, mode: 'ffa', teamSplit: 'mixed' };
+export const DEFAULT_SETTINGS: Settings = { maxRounds: 10, roundDuration: 60, wordChoiceCount: 3, mode: 'ffa', teamSplit: 'mixed', botSkill: 'strong' };
 
 export function cleanSettings(raw: unknown): Settings {
 	const r = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
@@ -176,6 +211,7 @@ export function cleanSettings(raw: unknown): Settings {
 		wordChoiceCount: choices >= LIMITS.minChoices && choices <= LIMITS.maxChoices ? choices : DEFAULT_SETTINGS.wordChoiceCount,
 		mode: r.mode === 'teams' ? 'teams' : 'ffa',
 		teamSplit: r.teamSplit === 'humans-vs-ai' ? 'humans-vs-ai' : 'mixed',
+		botSkill: BOT_SKILLS.includes(r.botSkill as BotSkill) ? (r.botSkill as BotSkill) : DEFAULT_SETTINGS.botSkill,
 	};
 }
 

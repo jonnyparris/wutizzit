@@ -5,6 +5,7 @@
 // Every model goes through the Workers AI binding. Third-party models (OpenAI, Anthropic, Google)
 // route through AI Gateway with Unified Billing, so no provider keys are needed.
 
+import { estimateTokens } from '../game/logic';
 import { cleanShapes, COMPACT_SHAPES_HELP, type Shape } from '../game/shapes';
 import { WORDS } from '../utils/words';
 
@@ -73,8 +74,8 @@ export const isRecognised = (v: Judgement) => v.rank === 1 && v.p >= RECOGNISED_
 
 /** What the room needs from a brain. Tests swap in a fake. */
 export interface Brain {
-	/** Free-form guesses from the vision model. */
-	guess(model: BotModel, input: GuessInput): Promise<string[]>;
+	/** Free-form guesses from the vision model, and how many tokens its reply took. */
+	guess(model: BotModel, input: GuessInput): Promise<GuessResult>;
 	/** Plans a drawing of `word` as shapes. */
 	plan(model: BotModel, word: string): Promise<Shape[]>;
 	/** Looks at its own drawing (`png`) plus how Clef misread it, and returns an improved drawing. */
@@ -90,12 +91,21 @@ export interface Brain {
 export interface GuessInput {
 	/** Base64 PNG of the current canvas. */
 	png: string;
-	/** Masked word, e.g. "_ _ _ _ e". */
-	hint: string;
-	letters: number;
+	/** Masked word, e.g. "_ _ _ _ e". Null when the room hides hints from bots. */
+	hint: string | null;
+	letters: number | null;
 	/** Guesses already made this round (by anyone), so the bot tries something new. */
 	tried: string[];
 }
+
+export interface GuessResult {
+	guesses: string[];
+	/** Output tokens of the model's reply (reported usage, else estimated from the text). */
+	tokens: number;
+}
+
+/** Output budget for a guess reply: `{"guesses":[...]}` with up to 3 words. */
+export const GUESS_MAX_TOKENS = 120;
 
 const TIMEOUT_MS = 30_000;
 const CLEF_TIMEOUT_MS = 10_000;
@@ -140,6 +150,13 @@ export function responseText(out: unknown): string {
 	return '';
 }
 
+/** Output tokens the provider reports (OpenAI-style or Anthropic-style usage), including hidden reasoning. */
+export function responseTokens(out: unknown): number | null {
+	const u = (out as Record<string, any>)?.usage;
+	const n = u?.completion_tokens ?? u?.output_tokens;
+	return typeof n === 'number' && Number.isFinite(n) && n > 0 ? n : null;
+}
+
 /** Finds the first JSON object or array in model output (models love wrapping JSON in prose). */
 export function extractJson(text: string): unknown {
 	const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
@@ -174,6 +191,18 @@ export function distractorsFor(word: string, n = 60, pool: readonly string[] = W
 
 /** One chat call with an optional PNG, in whichever message format the provider wants. */
 export async function runModel(env: BrainEnv, model: BotModel, system: string, text: string, png?: string, maxTokens = 400): Promise<string> {
+	return (await runModelWithUsage(env, model, system, text, png, maxTokens)).text;
+}
+
+/** Like runModel, plus the reply's output tokens (reported, or estimated from the text). */
+export async function runModelWithUsage(
+	env: BrainEnv,
+	model: BotModel,
+	system: string,
+	text: string,
+	png?: string,
+	maxTokens = 400,
+): Promise<{ text: string; tokens: number }> {
 	let messages: unknown[];
 	if (model.provider === 'anthropic') {
 		// Anthropic models take the native Messages format through the binding.
@@ -200,7 +229,8 @@ export async function runModel(env: BrainEnv, model: BotModel, system: string, t
 	const options = model.provider === 'workers-ai' ? undefined : { gateway: { id: env.AI_GATEWAY_ID || 'default' } };
 	// Without thinking, a reply takes a few seconds; a slow one is stuck, so give up sooner.
 	const out = await runWithRetry(() => (env.AI.run as any)(model.id, input, options), model.thinking === false ? FAST_TIMEOUT_MS : TIMEOUT_MS);
-	return responseText(out);
+	const reply = responseText(out);
+	return { text: reply, tokens: responseTokens(out) ?? estimateTokens(reply) };
 }
 
 const ARTIST = 'You draw simple, recognisable pictures for a Pictionary game using vector shapes. Reply with JSON only, no prose.';
@@ -233,6 +263,19 @@ Your current shapes (as objects): ${JSON.stringify(shapes).slice(0, 6000)}
 Reply with the complete improved drawing as {"shapes":[[...],[...]]}.`;
 }
 
+const GUESSER = 'You are playing a drawing-and-guessing game (like Pictionary). Look at the drawing and guess the word. Reply with JSON only.';
+
+/** The guessing prompt. Without a hint (rooms that hide it from bots) the bot gets the drawing only. */
+export function guessPrompt({ hint, letters, tried }: Pick<GuessInput, 'hint' | 'letters' | 'tried'>): string {
+	const pattern =
+		hint !== null && letters !== null
+			? `The answer has ${letters} letters. Pattern: ${hint} (underscores are hidden letters, spaces separate words).`
+			: 'You are not told how long the answer is.';
+	return `${pattern}
+${tried.length ? `Already guessed (wrong): ${tried.slice(-20).join(', ')}.` : ''}
+Reply as {"guesses":["best","second","third"]}: up to 3 single nouns${hint !== null ? ' that fit the pattern' : ''}, most likely first.`;
+}
+
 export function createBrain(env: BrainEnv): Brain {
 	const run = (model: BotModel, system: string, text: string, png?: string, maxTokens = 400) =>
 		runModel(env, model, system, text, png, maxTokens);
@@ -258,17 +301,14 @@ export function createBrain(env: BrainEnv): Brain {
 	});
 
 	return {
-		async guess(model, { png, hint, letters, tried }) {
-			const system =
-				'You are playing a drawing-and-guessing game (like Pictionary). Look at the drawing and guess the word. Reply with JSON only.';
-			const text = `The answer has ${letters} letters. Pattern: ${hint} (underscores are hidden letters, spaces separate words).
-${tried.length ? `Already guessed (wrong): ${tried.slice(-20).join(', ')}.` : ''}
-Reply as {"guesses":["best","second","third"]}: up to 3 single nouns that fit the pattern, most likely first.`;
-			const out = extractJson(await run(model, system, text, png, 120));
+		async guess(model, input) {
+			const reply = await runModelWithUsage(env, model, GUESSER, guessPrompt(input), input.png, GUESS_MAX_TOKENS);
+			const out = extractJson(reply.text);
 			const list = Array.isArray(out) ? out : (out as { guesses?: unknown })?.guesses;
-			return Array.isArray(list)
+			const guesses = Array.isArray(list)
 				? list.filter((g): g is string => typeof g === 'string' && g.trim().length > 0).map((g) => g.trim().slice(0, 40))
 				: [];
+			return { guesses, tokens: reply.tokens };
 		},
 
 		async plan(model, word) {

@@ -195,13 +195,17 @@ function createServer({ env, ip, origin }: Ctx) {
 				word_choices: z.number().int().min(2).max(5).optional(),
 				mode: z.enum(['ffa', 'teams']).optional().describe('Free-for-all or two teams.'),
 				team_split: z.enum(['mixed', 'humans-vs-ai']).optional().describe('In teams mode: mixed teams, or humans vs AI players.'),
+				bot_skill: z
+					.enum(['strong', 'medium', 'weak'])
+					.optional()
+					.describe('How hard bots play. strong: full speed (default). medium: humans get a 10 s head start and bots answer at most 5 tokens/s. weak: medium, and bots never see the letter hint.'),
 				custom_words: z.array(z.string()).min(5).max(500).optional(),
 			}),
 		},
-		async ({ session: s, rounds, draw_seconds, word_choices, mode, team_split, custom_words }) =>
+		async ({ session: s, rounds, draw_seconds, word_choices, mode, team_split, bot_skill, custom_words }) =>
 			act(s, {
 				type: 'start',
-				settings: { maxRounds: rounds ?? 6, roundDuration: draw_seconds ?? 90, wordChoiceCount: word_choices ?? 3, mode: mode ?? 'ffa', teamSplit: team_split ?? 'mixed' },
+				settings: { maxRounds: rounds ?? 6, roundDuration: draw_seconds ?? 90, wordChoiceCount: word_choices ?? 3, mode: mode ?? 'ffa', teamSplit: team_split ?? 'mixed', botSkill: bot_skill ?? 'strong' },
 				words: custom_words ?? null,
 			}),
 	);
