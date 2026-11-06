@@ -143,6 +143,10 @@ describe('rooms API', () => {
 		expect(full.status).toBe(409);
 		const again = await post(`/rooms/${roomId}/join`, { username: 'P0', token: tokens[0] }, randomIp());
 		expect(again.status).toBe(200);
+		const client = await Client.connect(roomId, tokens[0]);
+		const state = await client.state();
+		expect(state.maxPlayers).toBe(LIMITS.maxPlayers);
+		expect(state.players).toHaveLength(LIMITS.maxPlayers);
 	});
 
 	it('lets a player rejoin with their token and keep their identity', async () => {
