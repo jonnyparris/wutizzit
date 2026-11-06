@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+	botHandicap,
+	estimateTokens,
+	throttleDelayMs,
 	containsWord,
 	cleanCustomWords,
 	cleanDrawOp,
@@ -81,14 +84,33 @@ describe('input cleaning', () => {
 			wordChoiceCount: 5,
 			mode: 'teams',
 			teamSplit: 'humans-vs-ai',
+			botSkill: 'strong',
 		});
-		expect(cleanSettings({ maxRounds: 999, roundDuration: 7, wordChoiceCount: 'x', mode: 'battle' })).toEqual({
+		expect(cleanSettings({ maxRounds: 999, roundDuration: 7, wordChoiceCount: 'x', mode: 'battle', botSkill: 'godlike' })).toEqual({
 			maxRounds: 10,
 			roundDuration: 60,
 			wordChoiceCount: 3,
 			mode: 'ffa',
 			teamSplit: 'mixed',
+			botSkill: 'strong',
 		});
+		expect(cleanSettings({ botSkill: 'weak' }).botSkill).toBe('weak');
+		expect(cleanSettings({ botSkill: 'medium' }).botSkill).toBe('medium');
+	});
+
+	it('handicaps bots by skill', () => {
+		expect(botHandicap('strong')).toEqual({ headStartMs: 0, tokensPerSecond: null, seesHint: true });
+		expect(botHandicap('medium')).toEqual({ headStartMs: 10_000, tokensPerSecond: 5, seesHint: true });
+		expect(botHandicap('weak')).toEqual({ headStartMs: 10_000, tokensPerSecond: 5, seesHint: false });
+	});
+
+	it('throttles bot replies to a token rate', () => {
+		// 20 tokens at 5/s = 4 s after the bot started looking.
+		expect(throttleDelayMs(1_000, 20, 5, 2_000)).toBe(3_000);
+		expect(throttleDelayMs(1_000, 20, 5, 6_000)).toBe(0);
+		expect(throttleDelayMs(1_000, 20, null, 1_000)).toBe(0);
+		expect(estimateTokens('')).toBe(1);
+		expect(estimateTokens('{"guesses":["cat"]}')).toBe(5);
 	});
 
 	it('dedupes custom words and enforces a minimum', () => {

@@ -161,6 +161,13 @@
 										<option value="teams:humans-vs-ai">Humans vs AI</option>
 									</select>
 								</label>
+								<label class="select-field">Bot skill
+									<select id="bot-skill-setting" class="select" title="Medium: humans get a 10 s head start and bots answer at most 5 tokens a second. Weak: the same, and bots never see the letter hint.">
+										<option value="strong" selected>Strong</option>
+										<option value="medium">Medium: 10 s head start</option>
+										<option value="weak">Weak: no letter hints</option>
+									</select>
+								</label>
 								<button id="word-list-btn" class="btn btn-secondary h-10"><svg class="icon icon-sm"><use href="#i-list" /></svg><span>Custom words</span></button>
 								<button id="add-bot-btn" class="btn btn-secondary h-10"><svg class="icon icon-sm"><use href="#i-bot" /></svg><span>Add bot</span></button>
 								<div class="flex-1"></div>

@@ -631,6 +631,7 @@ class GameClient {
 			winnerSubtitle: $('winner-subtitle'),
 			resultsRest: $('results-rest'),
 			mode: $('mode-setting'),
+			botSkill: $('bot-skill-setting'),
 			teamBar: $('team-bar'),
 			addBotBtn: $('add-bot-btn'),
 			botModal: $('bot-modal'),
@@ -1307,11 +1308,16 @@ class GameClient {
 			},
 			{
 				name: 'start_game',
-				description: 'Host only: start the game with the settings in the lobby bar. Optional mode: ffa, teams or humans-vs-ai.',
-				inputSchema: { type: 'object', properties: { mode: { type: 'string', enum: ['ffa', 'teams', 'humans-vs-ai'] } } },
-				execute: async ({ mode }) => {
+				description:
+					'Host only: start the game with the settings in the lobby bar. Optional mode: ffa, teams or humans-vs-ai. Optional bot_skill: strong (full speed), medium (10 s head start for humans, bots answer at most 5 tokens/s) or weak (medium, and bots never see the letter hint).',
+				inputSchema: {
+					type: 'object',
+					properties: { mode: { type: 'string', enum: ['ffa', 'teams', 'humans-vs-ai'] }, bot_skill: { type: 'string', enum: ['strong', 'medium', 'weak'] } },
+				},
+				execute: async ({ mode, bot_skill }) => {
 					inGame();
 					if (mode) this.el.mode.value = mode === 'ffa' ? 'ffa' : mode === 'teams' ? 'teams:mixed' : 'teams:humans-vs-ai';
+					if (['strong', 'medium', 'weak'].includes(bot_skill)) this.el.botSkill.value = bot_skill;
 					this.startGame();
 					return ok('start requested');
 				},
@@ -1351,6 +1357,7 @@ class GameClient {
 				wordChoiceCount: Number(this.el.choices.value),
 				mode: this.el.mode.value.startsWith('teams') ? 'teams' : 'ffa',
 				teamSplit: this.el.mode.value.split(':')[1] ?? 'mixed',
+				botSkill: this.el.botSkill.value,
 			},
 			words: this.customWords,
 		});

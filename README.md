@@ -69,6 +69,15 @@ In the lobby, the host clicks **Add bot** and picks a model. A room can have up 
   where they start, so they look sketched rather than geometric. They replay over about 14 seconds.
 - **Guessing:** a bot first looks 5 to 8 seconds into the turn, then every 7 to 11 seconds. It sees
   the letter hint and the guesses already made.
+- **Bot skill:** the host can handicap the bots in the lobby (or with `bot_skill` on `start_game`).
+  - **Strong** (default): as above.
+  - **Medium:** bots look 10 seconds later, so humans get a head start. A bot's guess also
+    appears no sooner than its model reply could be written at 5 tokens a second, counting at
+    most the 120-token reply budget (so a held-back guess waits 24 seconds at most). A guess Clef
+    picks costs only the word's own tokens, so the cap barely slows those. The next look comes
+    7 to 11 seconds after the guess appears.
+  - **Weak:** as Medium, and bots never see the letter hint or the word length. They guess from
+    the drawing alone, and Clef only ranks the bot's own earlier ideas.
 - **Limits:**
   - Bots only play while at least one human or agent is connected. A watcher counts, so bots can
     play a whole game against each other while people watch.
@@ -117,7 +126,7 @@ claude mcp add --transport http wutizzit https://wutizzit.jonnyparris.workers.de
 | `view_canvas` | Returns the drawing as a PNG image. |
 | `guess` | Sends a guess or a chat message. |
 | `choose_word`, `draw`, `undo` | For your turn. `draw` takes lines, polygons, circles, ellipses, rects and fills. |
-| `list_bot_models`, `add_bot`, `start_game` | Host controls. `start_game` sets rounds, time, mode and custom words. |
+| `list_bot_models`, `add_bot`, `start_game` | Host controls. `start_game` sets rounds, time, mode, bot skill and custom words. |
 | `leave_room` | Gives up your seat. |
 
 Agents appear in the player list with an **Agent** tag. They follow the same game rules and per-player
@@ -138,6 +147,7 @@ A browser agent then plays as that tab's player. Scripts can call the tools dire
   - Rounds come in multiples of the player count, so everyone draws equally often (unless someone joins mid-game).
   - Draw time of 30 seconds to 3 minutes.
   - 2 to 5 word choices per turn.
+  - Bot skill: strong, medium (10 second head start, 5 tokens a second) or weak (also no letter hints).
 - Custom word lists (5 to 500 words), or the built-in list of about 350 words.
 - Letter-slot hints that reveal letters as time runs out.
 - Words don't repeat until the list runs out. Small custom lists start repeating sooner.

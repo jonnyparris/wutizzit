@@ -1,7 +1,7 @@
 import { env, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { exports } from 'cloudflare:workers';
 import { describe, expect, it } from 'vitest';
-import { distractorsFor, extractJson, responseText } from '../src/bots/brain';
+import { createBrain, distractorsFor, extractJson, guessPrompt, responseText, responseTokens } from '../src/bots/brain';
 import { fitsMask, maskWord } from '../src/game/logic';
 import { encodePng, rasterize, visibleOps } from '../src/game/raster';
 import { cleanShapes, fromCompact, seededRandom, shapesToOps, wobble } from '../src/game/shapes';
@@ -74,20 +74,23 @@ interface FakeAnswers {
 	/** Delays (ms) for the careful (thinking) plan and for revisions, to order the race. */
 	carefulMs?: number;
 	reviseMs?: number;
+	/** Output tokens the fake vision model reports for each guess reply. */
+	tokens?: number;
 }
 
 /** A fake brain with call counters, so tests never touch real models. */
 function installFakeBrain(roomId: string, answer: FakeAnswers) {
-	const calls = { guess: 0, plan: 0, revise: 0, judge: 0, pick: 0, easiest: 0 };
+	const calls = { guess: 0, plan: 0, revise: 0, judge: 0, pick: 0, easiest: 0, guessInputs: [] as any[] };
 	// Each kind of attempt has its own fill colour, so tests can tell which one was shown.
 	const draft = cleanShapes([['circle', 400, 250, 100, 'black', 'yellow'], ['rect', 100, 100, 50, 50, 'red', null]]);
 	const careful = cleanShapes([['rect', 60, 60, 600, 300, 'black', 'green']]);
 	const revised = cleanShapes([['rect', 50, 50, 700, 400, 'black', 'blue']]);
 	return inRoom(roomId, (obj) => {
 		obj.brain = {
-			async guess() {
+			async guess(_model: unknown, input: any) {
 				calls.guess++;
-				return answer.word ? ['nope', answer.word] : ['nope'];
+				calls.guessInputs.push({ hint: input.hint, letters: input.letters });
+				return { guesses: answer.word ? ['nope', answer.word] : ['nope'], tokens: answer.tokens ?? 1 };
 			},
 			async plan(model: { thinking?: boolean }) {
 				calls.plan++;
@@ -210,6 +213,26 @@ describe('brain parsing', () => {
 		expect(responseText({ response: 'a' })).toBe('a');
 		expect(responseText({ choices: [{ message: { content: 'b' } }] })).toBe('b');
 		expect(responseText({ content: [{ type: 'text', text: 'c' }] })).toBe('c');
+	});
+
+	it('reads output tokens from usage, and leaves the length out of a hintless prompt', () => {
+		expect(responseTokens({ usage: { completion_tokens: 42 } })).toBe(42);
+		expect(responseTokens({ usage: { output_tokens: 7 } })).toBe(7);
+		expect(responseTokens({ response: 'hi' })).toBeNull();
+		expect(guessPrompt({ hint: '_ _ t', letters: 3, tried: [] })).toMatch(/3 letters. Pattern: _ _ t/);
+		const blind = guessPrompt({ hint: null, letters: null, tried: ['cat'] });
+		expect(blind).not.toMatch(/letters|Pattern|fit the pattern/);
+		expect(blind).toMatch(/Already guessed \(wrong\): cat/);
+	});
+
+	it('returns the reply tokens from a real guess call, estimated when usage is missing', async () => {
+		const model = { id: 'm', label: 'M', short: 'M', provider: 'workers-ai', paid: false, thinking: false, prompt: 'plain' } as const;
+		const fakeEnv = (out: unknown) => ({ AI: { run: async () => out } as unknown as Ai });
+		const input = { png: 'x', hint: '_ _ _', letters: 3, tried: [] };
+		const reported = await createBrain(fakeEnv({ response: '{"guesses":["cat"]}', usage: { completion_tokens: 9 } })).guess(model, input);
+		expect(reported).toEqual({ guesses: ['cat'], tokens: 9 });
+		const estimated = await createBrain(fakeEnv({ response: '{"guesses":["cat","dog"]}' })).guess(model, input);
+		expect(estimated).toEqual({ guesses: ['cat', 'dog'], tokens: 7 }); // 25 characters / 4
 	});
 
 	it('finds JSON in prose and tolerates trailing commas', () => {
@@ -388,6 +411,124 @@ describe('bots', () => {
 		await client.next((m) => m.type === 'chat' && m.msg.kind === 'correct');
 		expect(calls.pick).toBe(1);
 		expect(calls.guess).toBe(0);
+	});
+
+	/** One human drawing, one bot guessing, with the given bot skill. Returns once a few strokes are down. */
+	async function botGuessing(botSkill: string, answer: FakeAnswers = {}) {
+		const { roomId, client } = await humanRoom();
+		const calls = await installFakeBrain(roomId, answer);
+		client.send({ type: 'add-bot' });
+		await client.state((x) => x.players.length === 2);
+		client.send({ type: 'start', settings: { maxRounds: 2, roundDuration: 60, botSkill } });
+		const s = await client.state((x) => x.phase === 'choosing');
+		client.send({ type: 'choose', index: 0 });
+		await client.state((x) => x.phase === 'drawing');
+		for (let i = 0; i < 4; i++) client.send({ type: 'draw', op: { k: 'line', s: i + 1, c: '#000000', w: 4, p: [10, 10, 200, 200] } });
+		await sleep(50);
+		return { roomId, client, calls, word: s.round.choices[0] as string };
+	}
+
+	const firstLookDelay = async (roomId: string) => {
+		let delay = 0;
+		await inRoom(roomId, (obj) => {
+			const bot = Object.values(obj.state.bots)[0] as any;
+			delay = bot.nextAt - obj.state.round.drawStartedAt;
+		});
+		return delay;
+	};
+
+	it('gives humans a 10 s head start on medium, and none on strong', async () => {
+		const strong = await botGuessing('strong');
+		const strongDelay = await firstLookDelay(strong.roomId);
+		expect(strongDelay).toBeGreaterThanOrEqual(5_000);
+		expect(strongDelay).toBeLessThanOrEqual(8_100);
+		const medium = await botGuessing('medium');
+		const mediumDelay = await firstLookDelay(medium.roomId);
+		expect(mediumDelay).toBeGreaterThanOrEqual(15_000);
+		expect(mediumDelay).toBeLessThanOrEqual(18_100);
+		await medium.client.next((m) => m.type === 'chat' && /Bots are on medium: humans get a 10 s head start/.test(m.msg.text));
+		expect(strong.client.messages.some((m) => m.type === 'chat' && /Bots are on/.test(m.msg.text))).toBe(false);
+	});
+
+	const botRec = async (roomId: string) => {
+		let rec: any;
+		await inRoom(roomId, (obj) => {
+			rec = { ...(Object.values(obj.state.bots)[0] as any) };
+		});
+		return rec;
+	};
+	const saidNope = (client: Client) => client.messages.some((m) => m.type === 'chat' && m.msg.text === 'nope');
+
+	it('holds a bot guess back to 5 tokens a second on medium, and posts it from the alarm', async () => {
+		// 10 tokens at 5/s: the guess may appear no sooner than 2 s after the bot looked.
+		const { roomId, client, calls } = await botGuessing('medium', { tokens: 10 });
+		const started = Date.now();
+		await stepBots(roomId);
+		const held = await botRec(roomId);
+		expect(held.pending).toBe('nope');
+		expect(held.nextAt - started).toBeGreaterThanOrEqual(1_900);
+		expect(held.nextAt - started).toBeLessThanOrEqual(2_100);
+		expect(saidNope(client)).toBe(false);
+		expect(calls.guessInputs[0].hint).toMatch(/_/);
+		await stepBots(roomId);
+		await client.next((m) => m.type === 'chat' && m.msg.text === 'nope');
+		const after = await botRec(roomId);
+		expect(after.pending).toBeNull();
+		expect(after.nextAt).toBeGreaterThan(Date.now() + 6_000);
+		expect(calls.guess).toBe(1);
+	});
+
+	it('drops a held-back guess when the round moves on', async () => {
+		const { roomId, client } = await botGuessing('medium', { tokens: 50 });
+		await stepBots(roomId);
+		expect((await botRec(roomId)).pending).toBe('nope');
+		await inRoom(roomId, (obj) => obj.endRound('test'));
+		await inRoom(roomId, (obj) => obj.nextRoundOrFinish());
+		await inRoom(roomId, (obj) => {
+			expect(obj.state.phase).toBe('choosing');
+			expect(obj.state.round.number).toBe(2);
+		});
+		expect((await botRec(roomId)).pending).toBeNull();
+		expect(saidNope(client)).toBe(false);
+	});
+
+	it('caps the held-back time at the guess reply budget, and keeps it through a pause', async () => {
+		// 5,000 reported tokens (hidden reasoning) count as 120: at most 24 s.
+		const { roomId, client } = await botGuessing('medium', { tokens: 5_000 });
+		const started = Date.now();
+		await stepBots(roomId);
+		const held = await botRec(roomId);
+		expect(held.nextAt - started).toBeLessThanOrEqual(24_100);
+		expect(held.nextAt - started).toBeGreaterThanOrEqual(23_000);
+		client.send({ type: 'pause' });
+		await client.state((x) => x.paused);
+		await inRoom(roomId, (obj) => {
+			obj.state.pausedAt -= 5_000; // pretend we were paused for 5s
+		});
+		client.send({ type: 'pause' });
+		await client.next((m) => m.type === 'chat' && m.msg.text === 'Game resumed');
+		const resumed = await botRec(roomId);
+		expect(resumed.pending).toBe('nope');
+		expect(resumed.nextAt).toBeGreaterThanOrEqual(held.nextAt + 5_000);
+		await stepBots(roomId);
+		await client.next((m) => m.type === 'chat' && m.msg.text === 'nope');
+	});
+
+	it('posts a strong bot guess without waiting', async () => {
+		const { roomId, client } = await botGuessing('strong', { tokens: 50 });
+		const started = Date.now();
+		await stepBots(roomId);
+		const nope = await client.next((m) => m.type === 'chat' && m.msg.text === 'nope', 3000);
+		expect(nope.msg.ts - started).toBeLessThan(2_000);
+	});
+
+	it('hides the letter hint from bots on weak', async () => {
+		const { roomId, client, calls } = await botGuessing('weak', { clef: { choice: 'x', p: 0.9 } });
+		await stepBots(roomId);
+		await client.next((m) => m.type === 'chat' && m.msg.text === 'nope', 3000);
+		// No hint and no ideas yet: nothing for Clef to rank, so the vision model guesses blind.
+		expect(calls.pick).toBe(0);
+		expect(calls.guessInputs[0]).toEqual({ hint: null, letters: null });
 	});
 
 	it('leaves with the last human', async () => {
@@ -605,8 +746,11 @@ describe('MCP agents', () => {
 		const alice = await Client.connect(roomId, joined.body.token);
 		await alice.next((m) => m.type === 'welcome');
 
-		const started = await toolJson('start_game', { session, rounds: 2, draw_seconds: 60 });
+		const started = await toolJson('start_game', { session, rounds: 2, draw_seconds: 60, bot_skill: 'weak' });
 		expect(started.state.phase).toBe('choosing');
+		await inRoom(roomId, (obj) => {
+			expect(obj.state.settings.botSkill).toBe('weak');
+		});
 		expect(started.state.role).toBe('drawer'); // first seat draws first
 		const word = started.state.choices[0];
 		await toolJson('choose_word', { session, index: 0 });
