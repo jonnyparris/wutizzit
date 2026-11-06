@@ -107,6 +107,12 @@ interface PlayerRec {
 	/** Bot model id (bots only). */
 	model?: string;
 	team?: Team | null;
+	/**
+	 * Watching, not playing: no seat (doesn't count towards maxPlayers or the 2 players needed to
+	 * start), never draws, guesses or scores, and sees the word. Humans only. A connected watcher
+	 * still counts as the audience bots need, so bots can play a whole game while people watch.
+	 */
+	spectator?: boolean;
 }
 
 interface BotRec {
@@ -149,7 +155,7 @@ interface ChatMsg {
 	playerId?: string;
 	username?: string;
 	text: string;
-	/** Set for chat from players who already guessed: only drawer + guessers may see it. */
+	/** Set for chat from players who already guessed and watchers: only the drawer, guessers and watchers see it. */
 	round?: number;
 }
 
@@ -322,11 +328,14 @@ export class GameRoomObject extends DurableObject<Env> {
 	async summary(): Promise<RoomSummary> {
 		const s = this.state;
 		if (!s) return { exists: false, maxPlayers: LIMITS.maxPlayers };
-		return { exists: true, phase: s.phase, playerCount: s.order.length, maxPlayers: LIMITS.maxPlayers };
+		return { exists: true, phase: s.phase, playerCount: this.playerIds().length, maxPlayers: LIMITS.maxPlayers };
 	}
 
-	/** `asAgent` is set by the MCP endpoint: the player acts over RPC instead of a WebSocket. */
-	async join(input: { username: unknown; token?: unknown; ipHash: string; asAgent?: boolean }): Promise<JoinResult> {
+	/**
+	 * `asAgent` is set by the MCP endpoint: the player acts over RPC instead of a WebSocket.
+	 * `spectate` joins to watch, without a seat. Ignored for agents and when rejoining with a token.
+	 */
+	async join(input: { username: unknown; token?: unknown; ipHash: string; asAgent?: boolean; spectate?: boolean }): Promise<JoinResult> {
 		const s = this.state;
 		if (!s) return { ok: false, status: 404, error: 'Room not found. It may have expired.' };
 
@@ -351,10 +360,12 @@ export class GameRoomObject extends DurableObject<Env> {
 			const mins = Math.ceil(bannedFor / 60_000);
 			return { ok: false, status: 403, error: `You were removed from this room. Try again in ${mins} minute${mins === 1 ? '' : 's'}.` };
 		}
-		if (s.order.length >= LIMITS.maxPlayers) return { ok: false, status: 409, error: 'Room is full.' };
+		const agent = input.asAgent === true;
+		const spectate = input.spectate === true && !agent;
+		if (spectate && this.spectatorIds().length >= LIMITS.maxSpectators) return { ok: false, status: 409, error: 'Too many people are watching this room.' };
+		if (!spectate && this.playerIds().length >= LIMITS.maxPlayers) return { ok: false, status: 409, error: 'Room is full. You can still watch.' };
 		if (nameTaken()) return { ok: false, status: 409, error: 'That username is taken in this room.' };
 
-		const agent = input.asAgent === true;
 		const player: PlayerRec = {
 			id: generateId(),
 			token: generateToken(),
@@ -366,11 +377,12 @@ export class GameRoomObject extends DurableObject<Env> {
 			ipHash: input.ipHash,
 			seen: agent,
 			kind: agent ? 'agent' : 'human',
+			...(spectate ? { spectator: true } : {}),
 		};
 		s.players[player.id] = player;
 		s.order.push(player.id);
 		player.team = this.teamForLateJoiner(player);
-		if (s.phase !== 'lobby') s.drawQueue.push(player.id);
+		if (s.phase !== 'lobby' && !spectate) s.drawQueue.push(player.id);
 		s.ownerId ??= player.id;
 		if (agent) this.system(`${username} joined`);
 		s.emptySince = null;
@@ -467,7 +479,7 @@ export class GameRoomObject extends DurableObject<Env> {
 		let next: string;
 		if (s.phase === 'lobby') {
 			next = s.ownerId === id
-				? s.order.length < 2
+				? this.playerIds().length < 2
 					? 'You are the host. Share the link with people, or add_bot, then start_game.'
 					: 'You are the host. Call start_game when everyone is in.'
 				: 'Waiting for the host to start. Call get_state with wait_seconds.';
@@ -494,7 +506,7 @@ export class GameRoomObject extends DurableObject<Env> {
 			hint: v.round?.hint ?? null,
 			youGuessed: v.round?.guessed ?? false,
 			canvasStrokes: visibleOps(this.loadOps()).length,
-			players: v.players.map((x) => ({ name: x.username, kind: x.kind, score: x.score, team: x.team ? TEAM_NAMES[x.team as Team] : null, drawing: x.isDrawer, guessed: x.guessed, connected: x.connected })),
+			players: v.players.filter((x) => !x.spectator).map((x) => ({ name: x.username, kind: x.kind, score: x.score, team: x.team ? TEAM_NAMES[x.team as Team] : null, drawing: x.isDrawer, guessed: x.guessed, connected: x.connected })),
 			teams: v.teams,
 			chat: s.chat.filter((m) => this.canSee(m, id)).slice(-15).map((m) => ({ from: m.username ?? 'system', text: m.text, kind: m.kind })),
 			lastRound: v.lastRound
@@ -542,7 +554,7 @@ export class GameRoomObject extends DurableObject<Env> {
 		player.leaveAt = null;
 		if (!player.seen) {
 			player.seen = true;
-			this.system(`${player.username} joined`);
+			this.system(player.spectator ? `${player.username} is watching` : `${player.username} joined`);
 		}
 		if (!wasConnected) this.broadcastState(player.id);
 		await this.commit();
@@ -607,6 +619,10 @@ export class GameRoomObject extends DurableObject<Env> {
 				return this.onKick(playerId, msg.playerId);
 			case 'add-bot':
 				return this.onAddBot(playerId, msg.model);
+			case 'spectate':
+				// Each switch is a chat line, a broadcast and a write: don't let one socket flip it in a loop.
+				if (this.allow(`t:${playerId}`, 3, 0.2)) return this.onSpectate(playerId, msg.on);
+				return this.notify(playerId, 'Slow down a little.');
 			case 'leave':
 				await this.removePlayer(playerId, 'left');
 				if (ws) this.safeClose(ws, CLOSE.left, 'Left room');
@@ -803,8 +819,8 @@ export class GameRoomObject extends DurableObject<Env> {
 			return;
 		}
 
-		// The drawer and players who already guessed talk in a private channel so they can't leak the word.
-		if (round.drawerId === playerId || round.guessed.includes(playerId)) {
+		// The drawer, players who already guessed and spectators talk in a private channel so they can't leak the word.
+		if (round.drawerId === playerId || round.guessed.includes(playerId) || player.spectator) {
 			// Deliberately stricter than containsWord(): "cats" or "bobcat" would still give the word away.
 			if (round.drawerId === playerId && normalizeGuess(text).includes(normalizeGuess(round.word))) {
 				this.notify(playerId, "You can't say the word.");
@@ -855,8 +871,8 @@ export class GameRoomObject extends DurableObject<Env> {
 		const s = this.state!;
 		if (s.ownerId !== playerId) return this.notify(playerId, 'Only the room owner can start the game.');
 		if (s.phase !== 'lobby') return this.notify(playerId, 'The game has already started.');
-		const ready = s.order.filter((id) => s.players[id].connected);
-		if (ready.length < 2) return this.notify(playerId, 'You need at least 2 players to start. Invite someone or add a bot.');
+		const ready = this.playerIds().filter((id) => s.players[id].connected);
+		if (ready.length < 2) return this.notify(playerId, "You need at least 2 players to start (people watching don't count). Invite someone or add a bot.");
 
 		s.settings = cleanSettings(rawSettings);
 		s.customWords = rawWords == null ? null : cleanCustomWords(rawWords);
@@ -913,7 +929,7 @@ export class GameRoomObject extends DurableObject<Env> {
 	private async onAddBot(requesterId: string, rawModel: unknown) {
 		const s = this.state!;
 		if (s.ownerId !== requesterId) return this.notify(requesterId, 'Only the host can add bots.');
-		if (s.order.length >= LIMITS.maxPlayers) return this.notify(requesterId, 'The room is full.');
+		if (this.playerIds().length >= LIMITS.maxPlayers) return this.notify(requesterId, 'The room is full.');
 		if (s.order.filter((id) => s.players[id].kind === 'bot').length >= MAX_BOTS) return this.notify(requesterId, `Up to ${MAX_BOTS} bots per room.`);
 		const model = findModel(rawModel) ?? findModel(DEFAULT_BOT_MODEL)!;
 		const taken = new Set(s.order.map((id) => normalizeGuess(s.players[id].username)));
@@ -943,6 +959,35 @@ export class GameRoomObject extends DurableObject<Env> {
 		this.broadcastState();
 		this.reportStats();
 		await this.commit();
+	}
+
+	/** Switches a human between playing and watching. Lobby only, so turn order and teams stay simple. */
+	private async onSpectate(playerId: string, raw: unknown) {
+		const s = this.state!;
+		const p = s.players[playerId];
+		if (!p || (p.kind ?? 'human') !== 'human' || typeof raw !== 'boolean') return;
+		if (!!p.spectator === raw) return;
+		if (s.phase !== 'lobby') return this.notify(playerId, 'You can switch between playing and watching in the lobby.');
+		if (raw && this.spectatorIds().length >= LIMITS.maxSpectators) return this.notify(playerId, 'Too many people are watching this room.');
+		if (!raw && this.playerIds().length >= LIMITS.maxPlayers) return this.notify(playerId, 'The room is full. You can keep watching.');
+		if (raw) p.spectator = true;
+		else delete p.spectator;
+		p.team = null;
+		this.system(raw ? `${p.username} is watching` : `${p.username} is playing`);
+		this.broadcastState();
+		this.reportStats();
+		await this.commit();
+	}
+
+	/** Everyone with a seat: humans, bots and agents who play. Spectators are left out. */
+	private playerIds(): string[] {
+		const s = this.state!;
+		return s.order.filter((id) => !s.players[id].spectator);
+	}
+
+	private spectatorIds(): string[] {
+		const s = this.state!;
+		return s.order.filter((id) => s.players[id].spectator);
 	}
 
 	// -------------------------------------------------------------------------
@@ -1151,7 +1196,7 @@ export class GameRoomObject extends DurableObject<Env> {
 		const s = this.state!;
 		for (const id of s.order) s.players[id].team = null;
 		if (s.settings.mode !== 'teams') return;
-		const ids = [...s.order].sort(() => Math.random() - 0.5);
+		const ids = this.playerIds().sort(() => Math.random() - 0.5);
 		if (s.settings.teamSplit === 'humans-vs-ai') {
 			const humans = ids.filter((id) => !this.isAi(s.players[id]));
 			const ai = ids.filter((id) => this.isAi(s.players[id]));
@@ -1170,7 +1215,7 @@ export class GameRoomObject extends DurableObject<Env> {
 	/** Mid-game joiners go to the AI side (humans vs AI) or the smaller team. */
 	private teamForLateJoiner(p: PlayerRec): Team | null {
 		const s = this.state!;
-		if (s.settings.mode !== 'teams' || s.phase === 'lobby') return null;
+		if (s.settings.mode !== 'teams' || s.phase === 'lobby' || p.spectator) return null;
 		const members = (t: Team) => s.order.filter((id) => id !== p.id && s.players[id].team === t);
 		if (s.settings.teamSplit === 'humans-vs-ai') {
 			const aSideIsHumans = members('A').every((id) => !this.isAi(s.players[id]));
@@ -1181,7 +1226,7 @@ export class GameRoomObject extends DurableObject<Env> {
 
 	/** Free-for-all drawing order: join order. Team games use nextTeamDrawer() instead. */
 	private turnOrder(): string[] {
-		return [...this.state!.order];
+		return this.playerIds();
 	}
 
 	/**
@@ -1237,10 +1282,10 @@ export class GameRoomObject extends DurableObject<Env> {
 	private startRound() {
 		const s = this.state!;
 		const connected = (id: string) => s.players[id]?.connected;
-		s.drawQueue = s.drawQueue.filter((id) => s.players[id]);
+		s.drawQueue = s.drawQueue.filter((id) => s.players[id] && !s.players[id].spectator);
 		if (!s.drawQueue.some(connected)) s.drawQueue = this.turnOrder();
 		const drawerId = s.settings.mode === 'teams' ? this.nextTeamDrawer() : s.drawQueue.find(connected);
-		if (!drawerId || s.order.length < 2) return this.finishGame('Not enough players');
+		if (!drawerId || this.playerIds().length < 2) return this.finishGame('Not enough players');
 		s.drawQueue = s.drawQueue.filter((id) => id !== drawerId);
 
 		const used = new Set(s.usedWords);
@@ -1297,7 +1342,7 @@ export class GameRoomObject extends DurableObject<Env> {
 		const s = this.state!;
 		const round = s.round;
 		if (s.phase !== 'drawing' || !round) return false;
-		const guessers = s.order.filter((id) => id !== round.drawerId && s.players[id].connected);
+		const guessers = this.playerIds().filter((id) => id !== round.drawerId && s.players[id].connected);
 		if (guessers.length > 0 && guessers.every((id) => round.guessed.includes(id))) {
 			this.endRound('Everyone guessed it.');
 			return true;
@@ -1324,7 +1369,7 @@ export class GameRoomObject extends DurableObject<Env> {
 		if (s.roundNumber >= s.settings.maxRounds) return this.finishGame();
 		// Someone is mid-reconnect: wait for them rather than ending the game. If their seat
 		// expires, removePlayer() ends the game instead.
-		if (s.order.filter((id) => s.players[id].connected).length < 2) {
+		if (this.playerIds().filter((id) => s.players[id].connected).length < 2) {
 			s.deadline = Date.now() + 2_000;
 			return;
 		}
@@ -1333,7 +1378,7 @@ export class GameRoomObject extends DurableObject<Env> {
 
 	private finishGame(reason?: string) {
 		const s = this.state!;
-		const finalScores = s.order
+		const finalScores = this.playerIds()
 			.map((id) => s.players[id])
 			.sort((a, b) => b.score - a.score)
 			.map((p) => ({ id: p.id, username: p.username, score: p.score }));
@@ -1370,6 +1415,7 @@ export class GameRoomObject extends DurableObject<Env> {
 		this.buckets.delete(`g:${playerId}`);
 		this.buckets.delete(`v:${playerId}`);
 		this.buckets.delete(`a:${playerId}`);
+		this.buckets.delete(`t:${playerId}`);
 		this.resyncPending.delete(playerId);
 		this.notices.delete(playerId);
 		delete s.bots[playerId];
@@ -1387,7 +1433,8 @@ export class GameRoomObject extends DurableObject<Env> {
 		}
 
 		if (s.ownerId === playerId) {
-			const candidates = s.order.filter((id) => s.players[id].kind !== 'bot');
+			// Connected humans and agents first, seated before watchers. (A watcher can host: that's how a bots-only match runs.)
+			const candidates = s.order.filter((id) => s.players[id].kind !== 'bot').sort((x, y) => Number(!!s.players[x].spectator) - Number(!!s.players[y].spectator));
 			s.ownerId = candidates.find((id) => s.players[id].connected) ?? candidates[0] ?? null;
 			if (s.ownerId) this.system(`${s.players[s.ownerId].username} is now the host`);
 		}
@@ -1399,7 +1446,7 @@ export class GameRoomObject extends DurableObject<Env> {
 			s.deadline = null;
 			s.pausedAt = null;
 			this.reportStats(true);
-		} else if (s.phase !== 'lobby' && s.order.length < 2) {
+		} else if (s.phase !== 'lobby' && this.playerIds().length < 2) {
 			this.finishGame('Not enough players');
 		} else if (s.round?.drawerId === playerId && (s.phase === 'drawing' || s.phase === 'choosing')) {
 			this.endRound(`${player.username} left mid-turn.`);
@@ -1428,10 +1475,11 @@ export class GameRoomObject extends DurableObject<Env> {
 		const round = s.round;
 		const isDrawer = round?.drawerId === viewerId;
 		const hasGuessed = !!round?.guessed.includes(viewerId);
+		const spectating = !!s.players[viewerId]?.spectator;
 		const remaining = s.deadline === null ? null : Math.max(0, s.deadline - (s.pausedAt ?? now));
 
 		return {
-			you: { id: viewerId, isOwner: s.ownerId === viewerId },
+			you: { id: viewerId, isOwner: s.ownerId === viewerId, spectator: spectating },
 			roomId: s.roomId,
 			ownerId: s.ownerId,
 			phase: s.phase,
@@ -1439,6 +1487,7 @@ export class GameRoomObject extends DurableObject<Env> {
 			roundNumber: s.roundNumber,
 			maxRounds: s.settings.maxRounds,
 			maxPlayers: LIMITS.maxPlayers,
+			maxSpectators: LIMITS.maxSpectators,
 			remaining,
 			paused: s.pausedAt !== null,
 			players: s.order.map((id) => {
@@ -1454,6 +1503,7 @@ export class GameRoomObject extends DurableObject<Env> {
 					model: p.kind === 'bot' ? (findModel(p.model)?.label ?? null) : null,
 					team: p.team ?? null,
 					thinking: this.botBusy.has(id),
+					spectator: !!p.spectator,
 				};
 			}),
 			teams: this.teamScores(),
@@ -1461,7 +1511,7 @@ export class GameRoomObject extends DurableObject<Env> {
 				? {
 						drawerId: round.drawerId,
 						hint: round.word ? maskWord(round.word, round.revealed) : null,
-						word: round.word && (isDrawer || hasGuessed) ? round.word : null,
+						word: round.word && (isDrawer || hasGuessed || spectating) ? round.word : null,
 						choices: isDrawer && !round.word ? round.choices : null,
 						guessed: hasGuessed,
 					}
@@ -1474,7 +1524,7 @@ export class GameRoomObject extends DurableObject<Env> {
 	private canSee(m: ChatMsg, viewerId: string): boolean {
 		const round = this.state?.round;
 		if (m.round === undefined || !round || m.round !== round.number) return true;
-		return round.drawerId === viewerId || round.guessed.includes(viewerId);
+		return round.drawerId === viewerId || round.guessed.includes(viewerId) || !!this.state!.players[viewerId]?.spectator;
 	}
 
 	private loadOps(): DrawOp[] {
@@ -1631,7 +1681,9 @@ export class GameRoomObject extends DurableObject<Env> {
 	private reportStats(force = false) {
 		const s = this.state;
 		if (!s || !s.roomId) return;
-		const key = `${s.order.length}|${s.phase === 'lobby' ? 0 : 1}`;
+		// Watchers don't take seats, so the open-rooms list counts players only.
+		const seats = this.playerIds().length;
+		const key = `${s.order.length}|${seats}|${s.phase === 'lobby' ? 0 : 1}`;
 		if (!force && key === s.statsKey) return;
 		s.statsKey = key;
 		s.statsReportedAt = Date.now();
@@ -1639,7 +1691,7 @@ export class GameRoomObject extends DurableObject<Env> {
 		const call =
 			s.order.length === 0
 				? stub.remove(s.roomId)
-				: stub.report({ roomId: s.roomId, playerCount: s.order.length, inGame: s.phase !== 'lobby' });
+				: stub.report({ roomId: s.roomId, playerCount: seats, inGame: s.phase !== 'lobby' });
 		this.ctx.waitUntil(call.catch((err: unknown) => console.warn('stats report failed', err)));
 	}
 }

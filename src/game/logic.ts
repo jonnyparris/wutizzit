@@ -2,6 +2,8 @@
 
 export const LIMITS = {
 	maxPlayers: 20,
+	/** People watching without a seat. They don't count towards maxPlayers. */
+	maxSpectators: 30,
 	usernameMax: 20,
 	chatMax: 100,
 	minRounds: 1,

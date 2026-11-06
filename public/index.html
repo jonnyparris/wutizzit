@@ -41,6 +41,7 @@
 				<symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7" /></symbol>
 				<symbol id="i-trophy" viewBox="0 0 24 24"><path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6M18 9h1.5a2.5 2.5 0 0 0 0-5H18M4 22h16M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22M18 2H6v7a6 6 0 0 0 12 0V2Z" /></symbol>
 				<symbol id="i-replay" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" /><path d="M3 3v5h5" /></symbol>
+				<symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z" /><circle cx="12" cy="12" r="3" /></symbol>
 				<symbol id="i-lock" viewBox="0 0 24 24"><rect x="4" y="11" width="16" height="10" rx="2" /><path d="M8 11V7a4 4 0 0 1 8 0v4" /></symbol>
 				<symbol id="i-brush" viewBox="0 0 24 24"><path d="m9.06 11.9 8.07-8.06a2.85 2.85 0 1 1 4.03 4.03l-8.06 8.08" /><path d="M7.07 14.94c-1.66 0-3 1.35-3 3.02 0 1.33-2.5 1.52-2 2.02 1.08 1.1 2.49 2.02 4 2.02 2.2 0 4-1.8 4-4.04a3.01 3.01 0 0 0-3-3.02Z" /></symbol>
 			</defs>
@@ -86,6 +87,7 @@
 							<label for="room-input" class="sr-only">Room code</label>
 							<input type="text" id="room-input" placeholder="ABC123" class="input flex-1 min-w-0 font-mono uppercase tracking-[0.3em]" maxlength="6" pattern="[A-Za-z0-9]{6}" autocapitalize="characters" spellcheck="false" />
 							<button type="submit" id="join-room-btn" class="btn btn-secondary px-5">Join</button>
+							<button type="button" id="watch-room-btn" class="btn btn-ghost px-3 hidden" title="Watch the game without playing"><svg class="icon"><use href="#i-eye" /></svg><span>Watch</span></button>
 						</div>
 					</form>
 
@@ -169,7 +171,7 @@
 						<div class="card p-3 sm:p-4">
 							<div id="word-bar" class="word-bar">
 								<div id="word-display" class="hidden text-center">
-									<div class="text-xs font-medium text-muted uppercase tracking-wider">Your word</div>
+									<div id="word-label" class="text-xs font-medium text-muted uppercase tracking-wider">Your word</div>
 									<div id="current-word" class="text-2xl font-bold tracking-tight"></div>
 								</div>
 								<div id="word-hint" class="hidden text-center">

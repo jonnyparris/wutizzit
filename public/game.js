@@ -23,6 +23,9 @@ function h(tag, props = {}, ...children) {
 }
 
 const show = (node, visible = true) => node.classList.toggle('hidden', !visible);
+const isRoomCode = (v) => /^[A-Z0-9]{6}$/.test(v);
+/** Players with a seat: everyone except people who are only watching. */
+const seated = (s) => s.players.filter((p) => !p.spectator);
 const store = {
 	get: (k) => {
 		try {
@@ -578,6 +581,7 @@ class GameClient {
 			joinForm: $('join-form'),
 			createBtn: $('create-room-btn'),
 			joinBtn: $('join-room-btn'),
+			watchBtn: $('watch-room-btn'),
 			invite: $('invite-banner'),
 			homeError: $('home-error'),
 			gamesList: $('active-games-list'),
@@ -672,6 +676,7 @@ class GameClient {
 			show(this.el.invite);
 			this.el.joinBtn.textContent = 'Join room';
 			this.el.joinBtn.className = 'btn btn-primary px-5';
+			show(this.el.watchBtn);
 			this.el.username.focus();
 			this.el.username.select();
 			return;
@@ -685,6 +690,8 @@ class GameClient {
 		show(this.el.home);
 		show(this.el.homeError, !!error);
 		if (error) this.el.homeError.textContent = error;
+		// A full room can still be watched, so keep the Watch button next to a valid code.
+		show(this.el.watchBtn, isRoomCode(this.el.roomInput.value));
 		this.refreshLobby();
 		clearInterval(this.lobbyTimer);
 		this.lobbyTimer = setInterval(() => document.visibilityState === 'visible' && this.refreshLobby(), 5000);
@@ -757,9 +764,10 @@ class GameClient {
 		}
 	}
 
-	async join(roomId) {
+	/** `spectate`: watch without a seat. Ignored when rejoining with a saved session. */
+	async join(roomId, { spectate = false } = {}) {
 		roomId = String(roomId || '').trim().toUpperCase();
-		if (!/^[A-Z0-9]{6}$/.test(roomId)) return this.showHome('Room codes are 6 letters or numbers.');
+		if (!isRoomCode(roomId)) return this.showHome('Room codes are 6 letters or numbers.');
 		const username = this.validName();
 		if (!username) return;
 		this.busy(true);
@@ -767,7 +775,7 @@ class GameClient {
 			const res = await fetch(`/rooms/${roomId}/join`, {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ username, token: session.get(roomId) }),
+				body: JSON.stringify({ username, token: session.get(roomId), spectate }),
 			});
 			const data = await res.json();
 			if (!res.ok) {
@@ -814,6 +822,7 @@ class GameClient {
 		this.el.roomInput.value = '';
 		this.el.joinBtn.textContent = 'Join';
 		this.el.joinBtn.className = 'btn btn-secondary px-5';
+		show(this.el.watchBtn, false);
 	}
 
 	validName() {
@@ -829,6 +838,7 @@ class GameClient {
 	busy(on) {
 		this.el.createBtn.disabled = on;
 		this.el.joinBtn.disabled = on;
+		this.el.watchBtn.disabled = on;
 	}
 
 	onFatalClose(code) {
@@ -843,10 +853,11 @@ class GameClient {
 			return;
 		}
 		if (code === CLOSE.invalidSession && roomId) {
-			// Our seat timed out (e.g. laptop slept). Try to grab a fresh one.
+			// Our seat timed out (e.g. laptop slept). Try to grab a fresh one, watching again if we were.
+			const spectate = !!this.state?.you.spectator;
 			session.clear(roomId);
 			this.resetRoom();
-			return this.join(roomId);
+			return this.join(roomId, { spectate });
 		}
 		session.clear(roomId);
 		this.resetRoom();
@@ -936,11 +947,11 @@ class GameClient {
 	renderHeader(s, isDrawer) {
 		const drawer = s.players.find((p) => p.id === s.round?.drawerId);
 		const name = drawer?.username ?? 'Someone';
-		const connectedCount = s.players.filter((p) => p.connected).length;
+		const connectedCount = seated(s).filter((p) => p.connected).length;
 		const lines = {
 			lobby: connectedCount < 2 ? 'Waiting for players' : s.you.isOwner ? 'Ready when you are' : 'Waiting for the owner to start',
 			choosing: isDrawer ? 'Pick a word to draw' : `${name} is picking a word`,
-			drawing: isDrawer ? 'Your turn to draw' : s.round?.guessed ? 'You got it. Nice one.' : `Guess what ${name} is drawing`,
+			drawing: isDrawer ? 'Your turn to draw' : s.you.spectator ? `Watching ${name} draw` : s.round?.guessed ? 'You got it. Nice one.' : `Guess what ${name} is drawing`,
 			intermission: 'Round over',
 		};
 		this.el.status.textContent = s.paused ? 'Paused by the room owner' : lines[s.phase];
@@ -949,9 +960,12 @@ class GameClient {
 
 	renderWord(s, isDrawer) {
 		const round = s.round;
-		const showWord = !!round?.word && (isDrawer || round.guessed);
+		const showWord = !!round?.word && (isDrawer || round.guessed || s.you.spectator);
 		show(this.el.wordDisplay, showWord);
-		if (showWord) this.el.currentWord.textContent = round.word;
+		if (showWord) {
+			this.el.currentWord.textContent = round.word;
+			$('word-label').textContent = s.you.spectator ? 'The word' : 'Your word';
+		}
 		const showHint = !showWord && s.phase === 'drawing' && !!round?.hint;
 		show(this.el.wordHint, showHint);
 		if (!showHint) return;
@@ -983,12 +997,26 @@ class GameClient {
 			return this.showOverlay(this.card(icon('pause', 'icon'), h('p', { class: 'text-lg font-bold', text: 'Paused' }), h('p', { class: 'text-sm text-muted', text: 'The room owner paused the game.' })));
 		}
 		if (s.phase === 'lobby') {
-			const enough = s.players.filter((p) => p.connected).length >= 2;
+			const enough = seated(s).filter((p) => p.connected).length >= 2;
+			const watching = s.you.spectator;
+			const title = enough
+				? s.you.isOwner
+					? 'Start the game when everyone is in'
+					: 'The owner will start the game soon'
+				: watching && s.you.isOwner
+					? 'Add 2 or more bots to watch them play'
+					: 'Invite at least one friend to play';
 			return this.showOverlay(
 				this.card(
 					h('p', { class: 'overlay-kicker', text: enough ? 'Lobby' : 'Waiting for players' }),
-					h('p', { class: 'text-lg font-bold', text: enough ? (s.you.isOwner ? 'Start the game when everyone is in' : 'The owner will start the game soon') : 'Invite at least one friend to play' }),
-					h('button', { class: 'btn btn-secondary', onclick: (ev) => this.shareLink(ev.currentTarget) }, icon('link'), h('span', { text: 'Copy invite link' })),
+					h('p', { class: 'text-lg font-bold', text: title }),
+					watching ? h('p', { class: 'text-sm text-muted', text: "You're watching: you'll see the word, but you won't draw or guess." }) : null,
+					h(
+						'div',
+						{ class: 'flex flex-wrap gap-2 justify-center' },
+						h('button', { class: 'btn btn-secondary', onclick: (ev) => this.shareLink(ev.currentTarget) }, icon('link'), h('span', { text: 'Copy invite link' })),
+						h('button', { class: 'btn btn-ghost', 'data-spectate': '', onclick: () => this.conn.send({ type: 'spectate', on: !watching }) }, icon(watching ? 'play' : 'eye'), h('span', { text: watching ? 'Play instead' : 'Just watch' })),
+					),
 				),
 			);
 		}
@@ -1050,10 +1078,11 @@ class GameClient {
 				...[...s.teams].sort((a, b) => a.team.localeCompare(b.team)).map((t) => h('div', { class: `team-score team-${t.team}` }, h('span', { text: t.name }), h('b', { text: t.score }))),
 			);
 		}
-		const sorted = [...s.players].sort((a, b) => b.score - a.score);
-		this.el.playerCount.textContent = `${s.players.length}/${s.maxPlayers}`;
+		const sorted = seated(s).sort((a, b) => b.score - a.score);
+		const watchers = s.players.filter((p) => p.spectator);
+		this.el.playerCount.textContent = `${sorted.length}/${s.maxPlayers}${watchers.length ? ` · ${watchers.length} watching` : ''}`;
 		// Skip identical rebuilds so a focused kick button keeps focus.
-		const key = JSON.stringify([sorted, s.you, s.ownerId]);
+		const key = JSON.stringify([sorted, watchers, s.you, s.ownerId]);
 		if (key === this.playersKey) return;
 		this.playersKey = key;
 		const top = sorted[0]?.score ?? 0;
@@ -1079,6 +1108,21 @@ class GameClient {
 					s.you.isOwner && !isMe ? h('button', { class: 'kick-btn', title: `Remove ${p.username}`, 'aria-label': `Remove ${p.username}`, onclick: () => this.kick(p) }, icon('x')) : null,
 				);
 			}),
+			...watchers.map((p) => {
+				const isMe = p.id === s.you.id;
+				const tags = [h('span', { class: 'tag', title: 'Watching: no seat, never draws or guesses' }, icon('eye', 'icon icon-xs'), 'Watching')];
+				if (isMe) tags.unshift(h('span', { class: 'tag', text: 'You' }));
+				if (p.id === s.ownerId) tags.push(h('span', { class: 'tag', title: 'Host: can start, pause and remove players' }, icon('crown', 'icon icon-xs'), 'Host'));
+				if (!p.connected) tags.push(h('span', { class: 'tag', text: 'Reconnecting' }));
+				return h(
+					'li',
+					{ class: `player spectator ${isMe ? 'me' : ''} ${p.connected ? '' : 'offline'}` },
+					h('span', { class: 'rank', text: '–' }),
+					avatar(p),
+					h('div', { class: 'min-w-0 flex-1' }, h('div', { class: 'truncate text-sm font-semibold', title: p.username, text: p.username }), h('div', { class: 'mt-0.5 flex flex-wrap gap-1' }, tags)),
+					s.you.isOwner && !isMe ? h('button', { class: 'kick-btn', title: `Remove ${p.username}`, 'aria-label': `Remove ${p.username}`, onclick: () => this.kick(p) }, icon('x')) : null,
+				);
+			}),
 		);
 	}
 
@@ -1086,12 +1130,12 @@ class GameClient {
 		const owner = s.you.isOwner;
 		const lobby = s.phase === 'lobby';
 		show(this.el.ownerBar, owner && lobby);
-		const connectedCount = s.players.filter((p) => p.connected).length;
+		const connectedCount = seated(s).filter((p) => p.connected).length;
 		this.el.startBtn.disabled = connectedCount < 2;
 		this.el.startBtn.replaceChildren(...(connectedCount < 2 ? ['Need 2+ players'] : s.results ? [icon('replay'), 'Play again'] : [icon('play'), 'Start game']));
 		show(this.el.pauseBtn, owner && (s.phase === 'drawing' || s.phase === 'choosing'));
 		this.el.pauseBtn.replaceChildren(icon(s.paused ? 'play' : 'pause'), s.paused ? 'Resume' : 'Pause');
-		if (owner && lobby) this.updateRoundOptions(Math.max(2, s.players.length));
+		if (owner && lobby) this.updateRoundOptions(Math.max(2, seated(s).length));
 	}
 
 	updateRoundOptions(playerCount) {
@@ -1110,6 +1154,7 @@ class GameClient {
 		const input = this.el.chatInput;
 		if (s.phase !== 'drawing') input.placeholder = 'Say something…';
 		else if (isDrawer) input.placeholder = 'Chat with players who guessed…';
+		else if (s.you.spectator) input.placeholder = 'Chat privately…';
 		else if (s.round?.guessed) input.placeholder = 'Chat with the others who got it…';
 		else input.placeholder = 'Type your guess…';
 		input.disabled = s.paused;
@@ -1125,7 +1170,7 @@ class GameClient {
 		else if (m.kind === 'notice') node = h('div', { class: 'msg msg-notice', text: m.text });
 		else {
 			const body = [h('span', { class: 'msg-name', text: m.username }), h('span', { text: m.text })];
-			node = m.round ? h('div', { class: 'msg msg-private', title: 'Only the drawer and players who guessed can see this' }, icon('lock', 'icon icon-xs'), h('span', {}, body)) : h('div', { class: 'msg' }, body);
+			node = m.round ? h('div', { class: 'msg msg-private', title: 'Only the drawer, players who guessed and watchers can see this' }, icon('lock', 'icon icon-xs'), h('span', {}, body)) : h('div', { class: 'msg' }, body);
 		}
 		const box = this.el.chat;
 		const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
@@ -1134,7 +1179,7 @@ class GameClient {
 		if (atBottom || !live) box.scrollTop = box.scrollHeight;
 
 		if (live && m.kind === 'correct') this.sound.play(m.playerId === s?.you.id ? 'correct' : 'other-correct');
-		if (live && m.kind === 'chat' && m.playerId === s?.you.id && s?.phase === 'drawing' && !s.round?.guessed && s.round?.drawerId !== s.you.id) this.sound.play('wrong');
+		if (live && m.kind === 'chat' && m.playerId === s?.you.id && s?.phase === 'drawing' && !s.you.spectator && !s.round?.guessed && s.round?.drawerId !== s.you.id) this.sound.play('wrong');
 	}
 
 	// --- Agent tools (WebMCP) ---------------------------------------------
@@ -1146,9 +1191,10 @@ class GameClient {
 		const s = this.state;
 		if (!s) return { screen: this.roomId ? 'connecting' : 'home', next: 'Call create_room or join_room.' };
 		const round = s.round;
-		const role = !round ? 'none' : round.drawerId === s.you.id ? 'drawer' : 'guesser';
+		const role = !round ? 'none' : round.drawerId === s.you.id ? 'drawer' : s.you.spectator ? 'watcher' : 'guesser';
 		let next = 'Wait, then call get_state again.';
 		if (s.phase === 'lobby') next = s.you.isOwner ? 'You are the host: add_bot or invite people, then start_game.' : 'Waiting for the host to start.';
+		else if (role === 'watcher') next = 'You are watching: you can chat, but not draw or guess.';
 		else if (s.phase === 'choosing' && role === 'drawer') next = 'Pick a word with choose_word.';
 		else if (s.phase === 'drawing' && role === 'drawer') next = `Draw "${round.word}" with draw. Never write letters.`;
 		else if (s.phase === 'drawing' && !round.guessed) next = `Call view_canvas, then guess. Pattern: ${round.hint}`;
@@ -1160,13 +1206,14 @@ class GameClient {
 			paused: s.paused,
 			round: s.roundNumber ? `${s.roundNumber}/${s.maxRounds}` : null,
 			timeLeftSeconds: s.remaining == null ? null : Math.round(s.remaining / 1000),
-			you: { name: s.players.find((p) => p.id === s.you.id)?.username, isHost: s.you.isOwner },
+			you: { name: s.players.find((p) => p.id === s.you.id)?.username, isHost: s.you.isOwner, watching: !!s.you.spectator },
 			role,
 			word: round?.word ?? null,
 			choices: round?.choices ?? null,
 			hint: round?.hint ?? null,
 			youGuessed: !!round?.guessed,
-			players: s.players.map((p) => ({ name: p.username, kind: p.kind, score: p.score, team: p.team, drawing: p.isDrawer, guessed: p.guessed })),
+			players: seated(s).map((p) => ({ name: p.username, kind: p.kind, score: p.score, team: p.team, drawing: p.isDrawer, guessed: p.guessed })),
+			watching: s.players.filter((p) => p.spectator).length,
 			teams: s.teams,
 			chat: (this.chatLog ?? []).slice(-15).map((m) => ({ from: m.username ?? m.kind, text: m.text })),
 			next,
@@ -1491,11 +1538,15 @@ class GameClient {
 			else this.createRoom();
 		});
 		e.createBtn.addEventListener('click', () => this.createRoom());
+		e.watchBtn.addEventListener('click', () => {
+			if (e.roomInput.value.trim()) this.join(e.roomInput.value, { spectate: true });
+		});
 		$('shuffle-name-btn').addEventListener('click', () => {
 			e.username.value = randomName();
 		});
 		e.roomInput.addEventListener('input', () => {
 			e.roomInput.value = e.roomInput.value.toUpperCase().replace(/[^A-Z0-9]/g, '');
+			show(e.watchBtn, isRoomCode(e.roomInput.value));
 		});
 		$('home-link').addEventListener('click', (ev) => {
 			if (!this.roomId) return;

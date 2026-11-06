@@ -42,6 +42,8 @@ async function joinRoom(request: Request, env: Env, roomId: string): Promise<Res
 	const result = await env.GAME_ROOM.getByName(roomId).join({
 		username: body.username,
 		token: body.token,
+		// Watch without a seat: doesn't count towards the player cap, never plays.
+		spectate: body.spectate === true,
 		// Bans are per room, keyed on a salted hash so raw IPs are never stored.
 		ipHash: await sha256Hex(`${roomId}:${ip}`),
 	});
