@@ -44,8 +44,17 @@ try {
 	await c.waitForSelector('#game-screen:not(.hidden)');
 	await a.waitForFunction(() => document.querySelector('#player-count')?.textContent?.includes('1 watching'));
 	assert((await a.textContent('#player-count')).startsWith('2/'), 'watchers do not take seats');
-	assert(await c.isVisible('[data-spectate]'), 'watcher can switch to playing in the lobby');
-	assert((await c.textContent('[data-spectate]')).includes('Play instead'), 'watcher sees "Play instead"');
+	// The lobby button renders from the watcher's own state, which arrives after the game screen shows.
+	await c.waitForSelector('[data-spectate]:has-text("Play instead")', { state: 'visible', timeout: 10_000 });
+	// Switching works both ways in the lobby. Wait for the watcher's own button to flip before each
+	// click: the old button would send the same request again, which the server ignores.
+	await c.click('[data-spectate]');
+	await c.waitForSelector('[data-spectate]:has-text("Just watch")');
+	await a.waitForFunction(() => /^3\/\d+$/.test(document.querySelector('#player-count')?.textContent ?? ''));
+	await c.click('[data-spectate]');
+	await c.waitForSelector('[data-spectate]:has-text("Play instead")');
+	// Back to 2 seats and 1 watcher.
+	await a.waitForFunction(() => /^2\/\d+ · 1 watching$/.test(document.querySelector('#player-count')?.textContent ?? ''), null, { timeout: 10_000 });
 
 	await a.click('#start-game-btn');
 	// Whoever draws picks the first word.
