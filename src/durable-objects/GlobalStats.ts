@@ -1,4 +1,5 @@
 import { DurableObject } from 'cloudflare:workers';
+import { LIMITS } from '../game/logic';
 
 interface RoomInfo {
 	id: string;
@@ -17,7 +18,6 @@ export interface LobbySnapshot {
 /** Rooms heartbeat every 5 minutes; anything silent for longer than this is gone. */
 const STALE_MS = 12 * 60_000;
 const MAX_LISTED = 20;
-const MAX_PLAYERS = 10;
 
 /**
  * A single, tiny directory of live rooms for the home page. Rooms push updates
@@ -66,7 +66,7 @@ export class GlobalStatsObject extends DurableObject<Env> {
 			totalPlayers: rooms.reduce((n, r) => n + r.playerCount, 0),
 			// Joinable rooms first (waiting, then in progress), newest activity first.
 			games: rooms
-				.filter((r) => r.playerCount < MAX_PLAYERS)
+				.filter((r) => r.playerCount < LIMITS.maxPlayers)
 				.sort((a, b) => Number(a.inGame) - Number(b.inGame) || b.updatedAt - a.updatedAt)
 				.slice(0, MAX_LISTED)
 				.map(({ id, playerCount, inGame }) => ({ id, playerCount, inGame })),

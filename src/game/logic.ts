@@ -1,7 +1,7 @@
 // Pure game helpers. No runtime dependencies, so they are cheap to unit test.
 
 export const LIMITS = {
-	maxPlayers: 10,
+	maxPlayers: 20,
 	usernameMax: 20,
 	chatMax: 100,
 	minRounds: 1,
